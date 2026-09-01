@@ -1414,3 +1414,84 @@ class TestNeuralHonesty:
         rep = walk_forward(x, y, "noise", n_folds=2, seed=5, min_train_dates=15,
                            min_train_rows=400, min_test_rows=100)
         assert abs(rep.mean_ic) < 0.15
+
+
+# --------------------------------------------------------------- cumulative
+class TestCumulativeLimit:
+    """The limit that stops a bleed. The daily limit never fired in 66 sessions."""
+
+    def _rec(self, nets):
+        return pd.DataFrame({
+            "trade_date": pd.date_range("2026-06-01", periods=len(nets), freq="B"),
+            "net_pnl": nets,
+        })
+
+    def test_measures_drawdown_from_peak_not_loss_from_start(self, cfg):
+        """Made 5k, gave back 4.5k -- as stopped as one that only ever lost."""
+        from kabali.risk.cumulative import evaluate
+
+        v = evaluate(self._rec([5000.0] + [-500.0] * 9), cfg.capital, 10.0)
+        assert v.peak == pytest.approx(5000.0)
+        assert v.equity == pytest.approx(500.0)
+        assert v.drawdown == pytest.approx(4500.0)
+        assert v.tripped, "gave back 4,500 of a 4,000 budget and did not trip"
+
+    def test_a_bot_that_never_traded_has_not_tripped(self, cfg):
+        from kabali.risk.cumulative import evaluate
+
+        assert not evaluate(None, cfg.capital, 10.0).tripped
+        assert not evaluate(self._rec([]), cfg.capital, 10.0).tripped
+
+    def test_profit_does_not_clear_a_standing_halt(self, cfg, tmp_path):
+        """The trip is sticky. A good next session is not an argument."""
+        from kabali.risk.cumulative import CumulativeHalt, require_clear
+
+        halt = tmp_path / "halt.json"
+        losing = self._rec([-500.0] * 10)
+        with pytest.raises(CumulativeHalt):
+            require_clear(losing, cfg.capital, 10.0, path=halt)
+        assert halt.exists()
+
+        # Now hand it a wildly profitable record. The standing halt still holds.
+        with pytest.raises(CumulativeHalt, match="standing cumulative halt"):
+            require_clear(self._rec([9000.0]), cfg.capital, 10.0, path=halt)
+
+    def test_clearing_requires_the_exact_phrase(self, cfg, tmp_path):
+        from kabali.risk.cumulative import (
+            RESUME_PHRASE, CumulativeHalt, cleared, require_clear,
+        )
+
+        halt = tmp_path / "halt.json"
+        with pytest.raises(CumulativeHalt):
+            require_clear(self._rec([-500.0] * 10), cfg.capital, 10.0, path=halt)
+
+        blob = json.loads(halt.read_text())
+        blob["resume"] = "yes ok fine"
+        halt.write_text(json.dumps(blob))
+        assert not cleared(halt)
+
+        blob["resume"] = RESUME_PHRASE
+        halt.write_text(json.dumps(blob))
+        assert cleared(halt)
+
+    def test_an_unreadable_halt_file_stops_trading(self, tmp_path):
+        """Guessing wrong the other way means trading through a stop."""
+        from kabali.risk.cumulative import read_halt
+
+        halt = tmp_path / "halt.json"
+        halt.write_text("{ this is not json")
+        assert read_halt(halt).get("tripped") is True
+
+    def test_config_refuses_a_cumulative_limit_below_the_daily_one(self):
+        """Otherwise one bad day stops the bot forever and the limit is a lie."""
+        from kabali.config import RiskConfig
+
+        bad = RiskConfig(
+            daily_loss_limit_pct=2.0, daily_profit_lock_pct=3.0,
+            per_trade_risk_pct=0.5, max_concurrent_positions=4,
+            max_gross_exposure_mult=3.0, max_position_notional_pct=30.0,
+            max_trades_per_day=12, max_consecutive_losses=4,
+            min_position_notional=5000.0, cumulative_loss_limit_pct=1.5,
+        )
+        with pytest.raises(ConfigError, match="must exceed the daily limit"):
+            bad.validate()

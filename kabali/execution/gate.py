@@ -65,6 +65,38 @@ CONFIRMATION_PHRASE = "I ACCEPT LIVE TRADING RISK"
 # Evidence older than this is stale and the gate closes on its own.
 MAX_EVIDENCE_AGE_DAYS = 14
 
+#: Criteria an operator may explicitly waive, and the reason the list is short.
+#:
+#: These four are JUDGEMENTS ABOUT WHETHER THE EDGE IS GOOD ENOUGH. A person is
+#: entitled to disagree with a threshold and trade anyway with their own money;
+#: that is a decision, not a malfunction, and a gate that made it unexpressible
+#: would simply be edited out of the way -- which destroys the record instead of
+#: keeping it.
+WAIVABLE = frozenset({
+    "net_profitability",     # the system is not profitable in paper
+    "profit_factor",         # profitable, but without the margin required
+    "sessions",              # fewer independent days than the floor
+    "trades",                # fewer round trips than the floor
+})
+
+#: Everything else is UNWAIVABLE, and each for a different reason:
+#:
+#:   armed / confirmation      the human act itself. Waivable arming is no arming.
+#:   gate_file                 there is nothing to read.
+#:   daily_limit_respected     a breach means the risk engine did not hold. That
+#:                             is a bug, and you cannot consent your way past a
+#:                             stop that does not fire.
+#:   provenance                the evidence was produced by different code or
+#:                             config, so it is not about the system being armed.
+#:                             Waiving it authorises a system nobody measured.
+#:   freshness                 evidence describing a market that no longer exists.
+#:   slippage_fidelity         the fill model has not been checked against
+#:                             anything independent.
+
+
+class GateWaiverRefused(RuntimeError):
+    """A waiver was requested for a criterion that may never be waived."""
+
 
 @dataclass(frozen=True)
 class GateCriteria:

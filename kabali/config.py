@@ -52,6 +52,10 @@ class RiskConfig:
     max_trades_per_day: int
     max_consecutive_losses: int
     min_position_notional: float
+    #: Drawdown from peak realised equity, across sessions, at which the bot
+    #: stops entirely. The daily limit caps one bad day; this caps a run of
+    #: mediocre ones, which is the shape a losing system actually takes.
+    cumulative_loss_limit_pct: float = 10.0
 
     def validate(self) -> None:
         if self.daily_loss_limit_pct <= 0:
@@ -60,6 +64,14 @@ class RiskConfig:
             raise ConfigError("risk.per_trade_risk_pct must be > 0")
         if self.max_concurrent_positions < 1:
             raise ConfigError("risk.max_concurrent_positions must be >= 1")
+        if self.cumulative_loss_limit_pct <= 0:
+            raise ConfigError(
+                "risk.cumulative_loss_limit_pct must be > 0; there is no unlimited mode")
+        if self.cumulative_loss_limit_pct <= self.daily_loss_limit_pct:
+            raise ConfigError(
+                f"risk.cumulative_loss_limit_pct ({self.cumulative_loss_limit_pct}%) must "
+                f"exceed the daily limit ({self.daily_loss_limit_pct}%), or one bad day "
+                f"stops the bot permanently and the cumulative limit means nothing.")
         # The structural check: if every open position stopped out at once, the
         # loss must not exceed the daily budget. Otherwise the daily limit is
         # decorative -- it could only fire after it had already been breached.
@@ -74,6 +86,9 @@ class RiskConfig:
 
     def daily_loss_limit(self, capital: float) -> float:
         return capital * self.daily_loss_limit_pct / 100.0
+
+    def cumulative_loss_limit(self, capital: float) -> float:
+        return capital * self.cumulative_loss_limit_pct / 100.0
 
     def daily_profit_lock(self, capital: float) -> float:
         return capital * self.daily_profit_lock_pct / 100.0

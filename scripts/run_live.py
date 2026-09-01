@@ -32,6 +32,9 @@ from kabali.data.intraday import daily_context                            # noqa
 from kabali.engine.live import LiveSession, make_dhan_feed                # noqa: E402
 from kabali.execution.gate import GateClosed, LiveGate                    # noqa: E402
 from kabali.execution.paper import PaperBroker                            # noqa: E402
+from kabali.risk.cumulative import (                                      # noqa: E402
+    CumulativeHalt, require_clear,
+)
 from kabali.execution import provenance                                   # noqa: E402
 from kabali.regime.classifier import classify                             # noqa: E402
 from kabali.strategies.registry import default_registry                   # noqa: E402
@@ -83,6 +86,28 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = load_config(args.config)
     log.info("config: %s", cfg.summary())
+
+    # --------------------------------------------- the cumulative loss limit
+    #
+    # Checked FIRST, before the gate and before any data is fetched. A bot that
+    # has lost its drawdown budget should not spend a rate limit discovering
+    # that, and it must never reach the point of holding a position it would
+    # then have to manage.
+    #
+    # Scored against the record for the venue being run: a live session is
+    # judged on live losses. Judging live trading by paper results would let a
+    # good replay fund a bad month.
+    record_name = "live_record.csv" if args.live else "paper_record.csv"
+    prior = (pd.read_csv(STATE_DIR / record_name)
+             if (STATE_DIR / record_name).exists() else None)
+    try:
+        cum = require_clear(prior, cfg.capital, cfg.risk.cumulative_loss_limit_pct)
+    except CumulativeHalt as exc:
+        print(exc)
+        print()
+        print("Refusing to trade. This does not clear itself.")
+        return 3
+    log.info("cumulative: %s", cum.detail)
 
     # ------------------------------------------------------------- the gate
     broker_kind = "paper"

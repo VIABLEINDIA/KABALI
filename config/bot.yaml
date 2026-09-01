@@ -21,6 +21,10 @@ risk:
   max_position_notional_pct: 30.0   # <= 30% of gross cap in any single name
   max_trades_per_day: 12        # cost drag ceiling; 12 round trips ~= 250 rupees
   max_consecutive_losses: 4     # pause the session; usually a regime the rules misread
+  # The daily limit caps one bad day. This caps a run of mediocre ones -- the
+  # shape a losing system actually takes. 10% of 40k = Rs 4,000 of drawdown from
+  # peak realised equity, after which the bot stops and will not restart itself.
+  cumulative_loss_limit_pct: 10.0
   # A position whose stop implies a size below this is not worth the fixed
   # per-order brokerage. Skipped rather than sized down.
   min_position_notional: 5000.0
