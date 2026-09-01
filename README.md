@@ -375,60 +375,78 @@ not seen.
 
 ## What it actually did
 
-Walk-forward paper replay, 66 sessions (2026-06-01 → 2026-09-01), 250 names
-scanned daily, regime and universe recomputed as-of each morning. This is the
-promoted record (`runs/paper_promote`, code `3d2f8a4b776d`) — the evidence the
-gate scores. Reproduce with
+<!-- BEGIN GENERATED RESULTS -- scripts/render_results.py -->
+
+Walk-forward paper replay, 66 sessions (2026-06-01 → 2026-09-01), 250 names scanned daily, regime and universe recomputed as-of each morning. This is the promoted record (`runs\paper_newuniverse`, code `29ede7822950`) — the evidence the gate scores. Reproduce with
 `python scripts/run_paper.py --days 60 --symbols 250 --promote`.
 
 | | |
 |---|---|
 | Sessions | 66 |
-| Round trips | 426 |
-| Win rate | 36.9% |
-| **Gross P&L** | **−₹4,495** |
-| Costs | ₹8,072 |
-| **Net P&L** | **−₹12,568 (−31.4% on ₹40,000)** |
-| Worst session | −₹755 (limit ₹800 — held) |
+| Round trips | 424 |
+| Win rate | 39.2% |
+| **Gross P&L** | **−₹3,923** |
+| Costs | ₹7,718 |
+| **Net P&L** | **−₹11,641 (-29.1% on ₹40,000)** |
+| Profit factor | 0.35 |
+| Worst session | −₹763 (limit ₹800 — held) |
 | Sessions breaching the daily limit | **0 / 66** |
-| Halted sessions | 16 |
+| Halted sessions | 17 |
 
-**The risk engine works. The strategies do not.**
+**It loses before costs.** Gross is −₹3,923, so this is not a fee problem with a good signal underneath. Costs then more than double the loss — ₹7,718 over 424 round trips is 19% of capital in friction across one quarter — but removing them entirely still leaves a losing system.
 
-Two separate readings, and conflating them is the mistake to avoid:
+**Breakeven diagnosis — payoff against hit rate:**
 
-**It loses before costs.** Gross is −₹4,495, so this is not a fee problem with a
-good signal underneath. Costs then nearly triple the loss — ₹8,072 over 426 round
-trips is 20% of capital in friction across one quarter — but removing them
-entirely still leaves a losing system.
-
-**Every rule sits below its own breakeven win rate:**
-
-| Strategy | Trades | Payoff | Needs | Got | Shortfall |
+| Strategy | Trades | Payoff | Needs | Got | Gap |
 |---|---|---|---|---|---|
-| VWAPReversion | 346 | 1.27 | 44.0% | 35.3% | −8.8pp |
-| OpeningRangeBreakout | 53 | 1.06 | 48.6% | 39.6% | −9.0pp |
-| VWAPPullback | 6 | 0.45 | 69.2% | 16.7% | −52.5pp |
-| GapFade | 21 | 0.86 | 53.7% | 61.9% | +8.2pp, sample too small |
+| VWAPReversion | 343 | 1.13 | 47.0% | 38.2% | -8.8pp |
+| OpeningRangeBreakout | 54 | 1.30 | 43.4% | 38.9% | -4.5pp |
+| GapFade | 17 | 0.48 | 67.5% | 64.7% | -2.8pp |
+| VWAPPullback | 6 | 0.61 | 62.1% | 33.3% | -28.7pp |
+| MomentumBurst | 4 | 2.91 | 25.6% | 25.0% | -0.6pp |
+| **All strategies** | **424** | **1.10** | **47.6%** | **39.2%** | **-8.5pp** |
 
-The whole stack needs 45.7% and gets 36.9%. GapFade is the only rule above its
-own line and it has 21 trades; at that sample a coin flip clears 62% about one
-time in ten. MomentumBurst did not fire at all in this replay, which is itself
-the point — a rule whose sample vanishes when the universe changes was never
-measuring anything stable.
+**By exit reason:**
 
-**By regime** — negative in three of four buckets, the fourth being 3 sessions:
+| Reason | Trades | Net |
+|---|---|---|
+| stop | 190 | −₹35,142 |
+| squareoff | 115 | −₹717 |
+| target | 119 | ₹24,218 |
+
+**By regime:**
 
 | Regime | Sessions | Net | Per session |
 |---|---|---|---|
-| neutral_range | 33 | −₹7,599 | −₹230 |
-| bear_range | 20 | −₹3,094 | −₹155 |
-| neutral_trend | 10 | −₹1,966 | −₹197 |
+| neutral_range | 33 | −₹7,444 | −₹226 |
+| bear_range | 20 | −₹3,093 | −₹155 |
+| neutral_trend | 10 | −₹1,195 | −₹119 |
 | bear_trend | 3 | +₹91 | +₹30 |
 
-This reproduces ULTIMATE's intraday finding — *"every regime bucket is negative;
-not regime-dependent, absent"* — on a different timeframe, a different universe,
-and an independently written engine.
+<sub>Generated from `state/paper_record.csv` (promoted 2026-09-01T22:57, config `69ebf0fdb476`). Do not edit by hand — run `scripts/render_results.py --write`.</sub>
+
+<!-- END GENERATED RESULTS -->
+
+**The risk engine works. The strategies do not.** Two separate readings, and
+conflating them is the mistake to avoid.
+
+**Every rule sits below its own breakeven win rate.** The payoff column above is
+the ratio of the average win to the average loss; `Needs` is the hit rate that
+ratio requires to break even. Every rule is short of it, and the stack is short
+by more than eight points. That gap does not close with parameter tuning: it is a
+property of where these rules place their stops relative to their targets.
+
+Two rules deserve a caveat rather than a reading. GapFade has clawed its way to a
+65% win rate and still loses money, because its payoff is 0.48 — it needs 67.5%.
+MomentumBurst fires four times in 66 sessions and vanished entirely on a slightly
+different universe. Neither has a sample worth interpreting, and the first is a
+standing reminder that a win rate on its own says nothing.
+
+**By regime, the loss is not concentrated anywhere.** It is negative in three of
+four buckets, the fourth being three sessions. This reproduces ULTIMATE's
+intraday finding — *"every regime bucket is negative; not regime-dependent,
+absent"* — on a different timeframe, a different universe, and an independently
+written engine.
 
 **Nothing here has been tuned to improve these numbers, and nothing should be.**
 Reading the table and adjusting parameters until it turns positive is fitting to
