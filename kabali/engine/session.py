@@ -53,6 +53,19 @@ EXIT_SQUAREOFF = "squareoff"
 EXIT_CIRCUIT = "circuit"
 
 
+def fill_source_of(broker) -> str:
+    """Where this session's fills came from: "simulated" or the live venue.
+
+    Read from the broker's own state rather than a flag the caller passes, so a
+    session cannot be labelled as having live fills by anything other than the
+    broker that produced them.
+    """
+    try:
+        return str(broker.state().source) or "unknown"
+    except Exception:                                             # noqa: BLE001
+        return "unknown"
+
+
 @dataclass
 class SessionResult:
     """Everything one session produced."""
@@ -71,6 +84,25 @@ class SessionResult:
     modelled_slippage: float = 0.0
     observed_slippage: float = 0.0
     loss_limit: float = 0.0
+    #: Set once an entry's slippage has been measured against market data rather
+    #: than reproduced from the model.
+    slippage_measured: bool = False
+    #: Which venue filled the orders: "simulated" for PaperBroker, "dhan" for real.
+    fill_source: str = "simulated"
+
+    @property
+    def slippage_source(self) -> str:
+        """What the observed slippage figure is actually evidence of.
+
+        The gate reads this rather than the broker name, because the question is
+        not who filled the order -- it is whether the observed number came from
+        anywhere other than the model it is being compared against.
+        """
+        if self.fill_source not in ("simulated", "unknown", ""):
+            return "broker"          # real fills: observed is what we were charged
+        if self.slippage_measured:
+            return "market"          # simulated fills, but measured against bars
+        return "modelled"            # observed is the model played back
 
     @property
     def net_pnl(self) -> float:
@@ -96,6 +128,8 @@ class SessionResult:
             "halt_kind": self.halt_kind,
             "modelled_slippage": round(self.modelled_slippage, 4),
             "observed_slippage": round(self.observed_slippage, 4),
+            "fill_source": self.fill_source,
+            "slippage_source": self.slippage_source,
             "loss_limit": round(self.loss_limit, 2),
         }
 
@@ -148,6 +182,7 @@ class SessionEngine:
             regime_label=getattr(self.regime, "label", "unknown"),
             universe_size=len(bars),
             loss_limit=self.cfg.risk.daily_loss_limit(self.cfg.capital),
+            fill_source=fill_source_of(self.broker),
         )
 
         bars = {s: d for s, d in bars.items() if d is not None and len(d)}
@@ -307,6 +342,11 @@ class SessionEngine:
             if row is None:
                 continue
             fill_ref = float(row["open"])       # next bar's open, as promised
+            # The signal's own entry is the signal bar's CLOSE -- the price the
+            # decision was actually made at. Captured before `replace` overwrites
+            # it with the fill reference, because the distance between the two is
+            # the measurable part of slippage.
+            decision_price = float(signal.entry)
 
             # The level that invalidated the idea may already be through by the
             # time we can act. Entering anyway would be entering a trade whose
@@ -352,6 +392,7 @@ class SessionEngine:
                 quantity=decision.quantity, reference_price=fill_ref,
                 reason=f"entry:{signal.strategy}", at=now,
                 stop=signal.stop, target=signal.target,
+                decision_price=decision_price,
             )
             fill = self.broker.submit(intent)
             if not fill.ok:
@@ -367,7 +408,8 @@ class SessionEngine:
                 planned_risk=decision.risk_amount, order_id=fill.order_id,
             ))
             result.entries += 1
-            self._account_slippage(fill, fill_ref, result)
+            self._account_slippage(fill, fill_ref, result,
+                                   decision_price=decision_price)
 
     def _exit(self, book, pos, price, now, reason, result) -> None:
         side = SELL if pos.side == "long" else BUY
@@ -417,18 +459,47 @@ class SessionEngine:
         inst = self.instruments.get(symbol)
         return str(getattr(inst, "security_id", symbol))
 
-    def _account_slippage(self, fill: Fill, reference: float, result: SessionResult) -> None:
-        """Accumulate realised vs predicted slippage, in rupees.
+    def _account_slippage(self, fill: Fill, reference: float, result: SessionResult,
+                          decision_price: float | None = None) -> None:
+        """Accumulate assumed vs. measured slippage, in rupees.
 
-        In a paper session these are equal by construction -- PaperBroker applies
-        exactly the modelled slippage -- so the gate's slippage-fidelity check is
-        vacuous until it sees LIVE fills. That is the intended behaviour, not an
-        oversight: the check exists to catch the model being wrong about the real
-        world, and a simulator cannot falsify itself.
+        MODELLED is what the cost model assumes: a flat `slippage_bps` against the
+        fill reference.
+
+        OBSERVED is what the market actually charged between deciding and being
+        able to act. An entry is decided on a bar's close and cannot fill until the
+        next bar opens; that move is real, it is in the bars, and it is the thing a
+        flat bps figure is standing in for. Measuring it is what makes the gate's
+        fidelity check mean something in paper.
+
+        The earlier version set observed to `fill.slippage`, which for a simulated
+        broker IS the modelled figure -- the ratio was 1.00 by construction and the
+        check could not fail. It is not that a simulator cannot be checked; it is
+        that checking it against its own output proves nothing. The bars are
+        independent of the model, so they can falsify it.
+
+        Where decision and reference coincide -- every exit, since a stop's trigger
+        price IS the reference -- nothing extra has been measured and the modelled
+        figure stands in unchanged. Those legs neither help nor hurt the ratio.
+
+        Favourable moves are NOT clamped away. A gap that opens in our favour is
+        genuinely cheaper than assumed, and discarding it while keeping the adverse
+        ones would bias the ratio upward and fail a model that is actually fine.
         """
-        result.observed_slippage += abs(fill.slippage) * fill.quantity
+        qty = fill.quantity
         result.modelled_slippage += (
-            abs(reference) * fill.quantity * self.cfg.costs.slippage_bps / 10_000.0)
+            abs(reference) * qty * self.cfg.costs.slippage_bps / 10_000.0)
+
+        if decision_price is None or decision_price <= 0:
+            result.observed_slippage += abs(fill.slippage) * qty
+            return
+
+        # Signed against the order: a buy filling above its decision price paid,
+        # a sell filling below it paid.
+        adverse = (fill.price - decision_price if fill.side == BUY
+                   else decision_price - fill.price)
+        result.observed_slippage += adverse * qty
+        result.slippage_measured = True
 
 
 class _Reservation:

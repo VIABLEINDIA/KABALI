@@ -33,7 +33,9 @@ import time
 
 import pandas as pd
 
-from kabali.engine.session import EXIT_SQUAREOFF, SessionEngine, SessionResult
+from kabali.engine.session import (
+    EXIT_SQUAREOFF, SessionEngine, SessionResult, fill_source_of,
+)
 from kabali.risk.book import SessionBook
 
 log = logging.getLogger(__name__)
@@ -73,6 +75,7 @@ class LiveSession:
             regime_label=getattr(self.engine.regime, "label", "unknown"),
             universe_size=len(self.engine.instruments),
             loss_limit=self.cfg.risk.daily_loss_limit(self.cfg.capital),
+            fill_source=fill_source_of(self.engine.broker),
         )
 
         last_seen: pd.Timestamp | None = None

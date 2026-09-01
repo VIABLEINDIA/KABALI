@@ -246,7 +246,7 @@ config edit cannot by itself risk money.
 | Round trips | ≥ 40 |
 | Net P&L after costs | > 0 |
 | Profit factor | ≥ 1.2 (not 1.0 — no margin otherwise) |
-| Observed ÷ modelled slippage | ≤ 1.5 |
+| Observed ÷ modelled slippage | ≤ 1.5, and measured against the bars, not the model |
 | Daily limit breaches | 0 (a breach is a risk-engine bug) |
 | Evidence age | ≤ 14 days |
 | Provenance | sidecar present, fingerprints match the installed code and loaded config |
@@ -279,11 +279,31 @@ Plus `armed: true` and the exact phrase `I ACCEPT LIVE TRADING RISK` written by
 hand into `state/LIVE_GATE.json`. That is friction placed where an irreversible
 decision is made, not security.
 
-**The slippage check is vacuous in paper and that is intentional.** `PaperBroker`
-applies exactly the modelled slippage, so observed and modelled coincide by
-construction — a simulator cannot falsify itself. The check only becomes
-meaningful against live fills, which is why forward paper trading on a live feed
-is a genuine prerequisite and not a formality.
+**What the slippage check actually measures.** It used to compare `fill.slippage`
+against the model that produced it: `PaperBroker` applies exactly the modelled
+slippage, so the ratio was 1.00 by construction and the check could not fail —
+yet it reported PASS, which reads as "fills were verified" at the moment someone
+is deciding to risk money.
+
+Observed is now measured against the bars instead. An entry is decided on a bar's
+close and cannot fill until the next bar opens; that move is real, it is in the
+data, and it is precisely what a flat `slippage_bps` is standing in for. The bars
+are independent of the cost model, so they can falsify it.
+
+    modelled = reference x qty x slippage_bps / 10,000
+    observed = (fill_price - decision_price) x qty      # signed against the order
+
+Exits measure nothing extra — a stop's trigger price *is* its reference, so there
+is no decision-to-fill lag — and favourable moves are not clamped away, since
+keeping only adverse ones would bias the ratio and fail a sound model. Each
+session records a `slippage_source` of `modelled`, `market` or `broker`, and the
+gate refuses to credit `modelled`.
+
+A passing ratio establishes one thing: that the assumption covers the
+decision-to-fill move. It does **not** cover what `PaperBroker` openly does not
+simulate — market impact, partial fills, queue position, rejection, or a scrip
+frozen at a circuit limit. Those still need live fills, so forward paper trading
+on a live feed remains a genuine prerequisite.
 
 ## Layout
 

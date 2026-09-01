@@ -430,6 +430,100 @@ class TestLiveGate:
         assert not v.passed
         assert any("sessions" in f for f in v.failures)
 
+    def test_measured_slippage_can_exceed_the_model(self):
+        """The measurement must be able to FAIL, or it is not a measurement.
+
+        A buy decided at 100.00 that fills at 101.00 paid Rs 1.00 per share. The
+        model assumes 5bps of 101.00, about Rs 0.05. Observed must reflect the real
+        gap, not the model, so the ratio blows out and the gate refuses.
+        """
+        from kabali.engine.session import SessionEngine, SessionResult
+        from kabali.execution.broker import BUY, Fill
+
+        cfg = load_config()
+        engine = SessionEngine.__new__(SessionEngine)
+        engine.cfg = cfg
+        res = SessionResult(trade_date=dt.date(2026, 8, 28),
+                            book=SessionBook(trade_date=dt.date(2026, 8, 28),
+                                             capital=cfg.capital),
+                            regime_label="t", universe_size=1)
+        fill = Fill(symbol="X", side=BUY, quantity=10, price=101.0, cost=5.0,
+                    at=pd.Timestamp("2026-08-28 10:00"), order_id="1",
+                    status="filled", slippage=0.05)
+        engine._account_slippage(fill, 101.0, res, decision_price=100.0)
+
+        assert res.slippage_measured
+        assert res.slippage_source == "market"
+        assert res.observed_slippage == pytest.approx(10.0)          # Rs 1.00 x 10
+        assert res.modelled_slippage == pytest.approx(0.505)         # 5bps x 101 x 10
+        assert res.observed_slippage / res.modelled_slippage > 1.5   # gate would refuse
+
+    def test_favourable_moves_are_not_clamped_away(self):
+        """Keeping only adverse gaps would bias the ratio and fail a sound model."""
+        from kabali.engine.session import SessionEngine, SessionResult
+        from kabali.execution.broker import BUY, Fill
+
+        cfg = load_config()
+        engine = SessionEngine.__new__(SessionEngine)
+        engine.cfg = cfg
+        res = SessionResult(trade_date=dt.date(2026, 8, 28),
+                            book=SessionBook(trade_date=dt.date(2026, 8, 28),
+                                             capital=cfg.capital),
+                            regime_label="t", universe_size=1)
+        fill = Fill(symbol="X", side=BUY, quantity=10, price=99.0, cost=5.0,
+                    at=pd.Timestamp("2026-08-28 10:00"), order_id="1",
+                    status="filled", slippage=0.05)
+        engine._account_slippage(fill, 99.0, res, decision_price=100.0)
+        assert res.observed_slippage == pytest.approx(-10.0)
+
+    def test_exits_measure_nothing_extra(self):
+        """A stop's trigger price IS its reference; there is no lag to measure."""
+        from kabali.engine.session import SessionEngine, SessionResult
+        from kabali.execution.broker import BUY, Fill
+
+        cfg = load_config()
+        engine = SessionEngine.__new__(SessionEngine)
+        engine.cfg = cfg
+        res = SessionResult(trade_date=dt.date(2026, 8, 28),
+                            book=SessionBook(trade_date=dt.date(2026, 8, 28),
+                                             capital=cfg.capital),
+                            regime_label="t", universe_size=1)
+        fill = Fill(symbol="X", side=BUY, quantity=10, price=100.05, cost=5.0,
+                    at=pd.Timestamp("2026-08-28 10:00"), order_id="1",
+                    status="filled", slippage=0.05)
+        engine._account_slippage(fill, 100.0, res)
+        assert not res.slippage_measured
+        assert res.slippage_source == "modelled"
+
+    def test_model_played_back_cannot_establish_slippage_fidelity(self):
+        """Comparing a model against its own output proves nothing.
+
+        Before this, 66 sessions scored PASS at ratio 1.00 and read as "fills were
+        verified" at the moment of the live decision.
+        """
+        rec = pd.DataFrame({
+            "trade_date": pd.date_range("2026-08-01", periods=25, freq="B"),
+            "trades": [2] * 25, "wins": [2] * 25, "gross_pnl": [100] * 25,
+            "costs": [20] * 25, "net_pnl": [40] * 25,
+            "modelled_slippage": [10] * 25, "observed_slippage": [10] * 25,
+            "slippage_source": ["modelled"] * 25, "loss_limit": [800] * 25,
+        })
+        v = evaluate(rec, GateCriteria(), now=pd.Timestamp("2026-09-02"))
+        assert not v.passed
+        assert any("NOT ESTABLISHED" in f for f in v.failures)
+
+    def test_real_fills_are_scored_on_the_ratio(self):
+        rec = pd.DataFrame({
+            "trade_date": pd.date_range("2026-08-01", periods=25, freq="B"),
+            "trades": [2] * 25, "wins": [2] * 25, "gross_pnl": [100] * 25,
+            "costs": [20] * 25, "net_pnl": [40] * 25,
+            "modelled_slippage": [10] * 25, "observed_slippage": [11] * 25,
+            "slippage_source": ["broker"] * 25, "loss_limit": [800] * 25,
+        })
+        v = evaluate(rec, GateCriteria(), now=pd.Timestamp("2026-09-02"))
+        ok, detail = v.checks["slippage_fidelity"]
+        assert ok and "broker" in detail
+
     def test_refuses_when_observed_slippage_exceeds_model(self):
         rec = pd.DataFrame({
             "trade_date": pd.date_range("2026-08-01", periods=25, freq="B"),
@@ -473,7 +567,7 @@ class TestLiveGate:
             "trades": [2] * days, "wins": [2] * days, "gross_pnl": [100] * days,
             "costs": [20] * days, "net_pnl": [40] * days,
             "modelled_slippage": [10] * days, "observed_slippage": [9] * days,
-            "loss_limit": [800] * days,
+            "slippage_source": ["market"] * days, "loss_limit": [800] * days,
         })
 
     def _armed_gate(self, cfg, tmp_path, monkeypatch):

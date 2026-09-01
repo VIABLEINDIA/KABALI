@@ -29,11 +29,18 @@ class OrderIntent:
     security_id: str
     side: str                    # buy | sell
     quantity: int
-    reference_price: float       # price the decision was made at
+    reference_price: float       # price the fill is quoted against
     reason: str                  # entry:<strategy> | exit:<stop|target|squareoff|circuit>
     at: pd.Timestamp
     stop: float | None = None
     target: float | None = None
+    #: Price at the moment the decision was actually made, when that differs from
+    #: the reference the fill is quoted against. An entry decided on a bar's close
+    #: cannot fill until the next bar opens, and the move between the two is a real
+    #: cost that no simulator invents -- it is in the bars. Carrying it here is what
+    #: lets the gate compare assumed slippage against a measured one. None means
+    #: decision and reference coincide, so there is nothing extra to measure.
+    decision_price: float | None = None
 
     def __post_init__(self):
         if self.side not in (BUY, SELL):

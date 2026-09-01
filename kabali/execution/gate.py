@@ -156,7 +156,27 @@ def evaluate(sessions: pd.DataFrame, criteria: GateCriteria | None = None,
           f"profit factor {pf:.2f}, need >= {c.min_profit_factor}")
 
     # Slippage fidelity.
-    if "observed_slippage" in df and "modelled_slippage" in df:
+    #
+    # A simulated broker applies exactly the modelled slippage, so its observed
+    # figure IS the model and the ratio is 1.00 whatever the model is worth. That
+    # is documented in `engine.session._account_slippage`, but a check reported as
+    # PASS reads as "fills were verified" at exactly the moment the operator is
+    # deciding to risk money. It is reported as NOT ESTABLISHED instead: the
+    # comparison has not been made, which is the truth, and no amount of further
+    # simulated evidence can change it.
+    sources = (set(df["slippage_source"].astype(str).str.lower())
+               if "slippage_source" in df else set())
+    real = {s for s in sources if s in ("market", "broker")}
+
+    if "observed_slippage" not in df or "modelled_slippage" not in df:
+        v.add("slippage_fidelity", False,
+              "paper record has no slippage columns -- fills were never compared")
+    elif not real:
+        v.add("slippage_fidelity", False,
+              f"NOT ESTABLISHED: across {len(df)} sessions the observed figure is the "
+              f"model played back, not an independent measurement -- re-run the replay "
+              f"so decision-to-fill slippage is measured against the bars")
+    else:
         obs = float(df["observed_slippage"].sum())
         mod = float(df["modelled_slippage"].sum())
         if mod <= 0:
@@ -164,11 +184,9 @@ def evaluate(sessions: pd.DataFrame, criteria: GateCriteria | None = None,
                   "modelled slippage is zero -- cannot verify fill assumptions")
         else:
             ratio = obs / mod
-            v.add("slippage_fidelity", ratio <= c.max_slippage_ratio,
-                  f"observed/modelled slippage {ratio:.2f}, need <= {c.max_slippage_ratio}")
-    else:
-        v.add("slippage_fidelity", False,
-              "paper record has no slippage columns -- fills were never compared")
+            detail = f"observed/modelled slippage {ratio:.2f}, need <= {c.max_slippage_ratio}"
+            detail += f" (measured from: {', '.join(sorted(real))})"
+            v.add("slippage_fidelity", ratio <= c.max_slippage_ratio, detail)
 
     # Drawdown: no session may have breached the configured daily loss limit.
     if "net_pnl" in df and "loss_limit" in df:
