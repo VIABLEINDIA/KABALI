@@ -49,6 +49,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from kabali.config import RUNS_DIR, STATE_DIR, load_config            # noqa: E402
 from kabali.core import ensure_core_importable                       # noqa: E402
 from kabali.execution import provenance                              # noqa: E402
+from kabali.fundamentals.store import FundamentalsStore              # noqa: E402
 
 log = logging.getLogger("diagnose")
 
@@ -290,6 +291,30 @@ def check_coverage_gaps(bars_dir: Path, universe: set[str]) -> list[Finding]:
         count=len(traded or rows))]
 
 
+def check_fundamentals(universe: set[str]) -> list[Finding]:
+    """Coverage and freshness of the fundamentals cache.
+
+    This is the one input the bot cannot refresh on its own -- it comes from an
+    agent-session connector, not from anything a 09:00 process can call. So its
+    age is an operational fact, not an implementation detail, and it belongs in
+    the same report as a stale bar cache.
+    """
+    store = FundamentalsStore()
+    if not len(store):
+        return [Finding(INFO, "fundamentals", "no fundamentals cached",
+                        detail="Valuation data is optional; nothing depends on it yet.",
+                        remedy="populate state/fundamentals.json from an agent session")]
+    c = store.coverage(sorted(universe))
+    sev = INFO if c["covered"] >= len(universe) * 0.9 else WARN
+    return [Finding(
+        sev, "fundamentals",
+        f"{c['covered']}/{c['requested']} universe names have fundamentals",
+        detail=f"{c['fresh']} fresh, {c['stale']} stale, {c['missing']} missing; "
+               f"median age {c['median_age_days']}d. This cache cannot self-refresh: "
+               f"the connector that fills it is not reachable from a scheduled run.",
+        remedy="" if sev == INFO else "top up from an agent session before relying on it")]
+
+
 def check_run_logs(runs_dir: Path, limit_files: int = 40) -> list[Finding]:
     """Group failures across run logs by cause, not by occurrence."""
     logs = sorted(runs_dir.glob("*.log"), key=lambda p: -p.stat().st_mtime)[:limit_files]
@@ -434,6 +459,7 @@ def main() -> int:
     findings += check_universe(as_of, len(universe))
     findings += check_cache_audits(universe, Path(BARS_DIR))
     findings += check_coverage_gaps(Path(BARS_DIR), universe)
+    findings += check_fundamentals(universe)
     if not args.universe_only:
         findings += check_run_logs(RUNS_DIR)
     findings += check_record(cfg)
