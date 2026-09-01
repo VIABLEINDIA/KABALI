@@ -120,6 +120,27 @@ def _classify_warning(text: str) -> str:
     return "other"
 
 
+def _range_had_sessions(line: str) -> bool:
+    """Could the failed range have contained a trading session at all?
+
+    A vendor refusal on a range with no weekdays is the vendor being right, not
+    a symptom. Calendar chunking used to leave a weekend-only tail, and counting
+    those refusals reported 35 healthy symbols as repeatedly failing -- with a
+    remedy of dropping them from the universe, which would have deleted 14% of it.
+
+    Weekends only; exchange holidays would need a calendar this does not have.
+    Erring toward reporting a failure is right here: a false positive costs a
+    look, a false negative hides a symbol that genuinely stopped resolving.
+    """
+    m = re.search(r"(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})", line)
+    if not m:
+        return True
+    try:
+        return bool(len(pd.bdate_range(m.group(1), m.group(2))))
+    except (ValueError, TypeError):
+        return True
+
+
 def _normalise_log_line(line: str) -> str:
     """Collapse a log line to its cause, dropping ids, addresses and dates."""
     s = re.sub(r"0x[0-9A-Fa-f]+", "<addr>", line)
@@ -333,7 +354,7 @@ def check_run_logs(runs_dir: Path, limit_files: int = 40) -> list[Finding]:
                 continue
             causes[_normalise_log_line(line)] += 1
             m = re.search(r"(?:WARNING|ERROR)\s+([A-Z][A-Z0-9&\-]{1,15})\s+(?:D|\d+m)\b", line)
-            if m:
+            if m and _range_had_sessions(line):
                 per_symbol[m.group(1)] += 1
 
     out: list[Finding] = []
@@ -368,11 +389,12 @@ def check_run_logs(runs_dir: Path, limit_files: int = 40) -> list[Finding]:
         if repeat:
             out.append(Finding(
                 WARN, "symbols", f"{len(repeat)} symbols failed on 3+ separate occasions",
-                detail="A name that fails repeatedly across runs is not transient. It is "
-                       "either delisted, renamed, or has a security id the historical "
-                       "endpoint will not serve.",
-                remedy="verify each against the scrip master; drop the ones that no "
-                       "longer resolve",
+                detail="A name that fails repeatedly across runs is not transient -- but "
+                       "verify before acting. Refusals on ranges with no trading days are "
+                       "already excluded; confirm the rest actually fail a live fetch "
+                       "before concluding anything about the symbol.",
+                remedy="probe each with a live daily_bars call over a recent window; "
+                       "only names that fail THAT are candidates for removal",
                 subjects=repeat, count=len(repeat)))
 
     out.append(Finding(INFO, "logs", f"{len(logs)} run log(s) scanned",
