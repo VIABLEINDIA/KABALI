@@ -20,6 +20,19 @@ respond to the same technical setup very differently -- one has a book deep
 enough to absorb an order, the other does not. The universe's turnover screen is
 a proxy for that; market cap is the thing itself.
 
+THE SYMBOL MUST MATCH, NOT JUST THE SEARCH
+==========================================
+The connector resolves a free-text query to a company, and it will happily return
+a DIFFERENT one rather than nothing. Querying "MANINDS Man Industries India"
+returned Solar Industries -- a Rs 183,000 crore explosives maker filed under a
+Rs 1,000 crore pipe manufacturer's symbol. Nothing about the response says it is
+wrong; it is a well-formed record for a real company.
+
+So a result is accepted only when its `nse_code` equals the symbol asked for.
+Three of the first forty names could not be resolved that way and are absent
+rather than wrong, which is the correct outcome: a missing record is visible in
+the coverage report, and a wrong one ranks and filters exactly like a right one.
+
 WHAT IT IS NOT
 ==============
 Not an edge. Adding a size filter to a strategy that loses before costs makes it
