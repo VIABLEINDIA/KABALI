@@ -299,6 +299,16 @@ keeping only adverse ones would bias the ratio and fail a sound model. Each
 session records a `slippage_source` of `modelled`, `market` or `broker`, and the
 gate refuses to credit `modelled`.
 
+**Measured, over 426 entries:** observed ₹2,906 against ₹7,613 modelled — a
+ratio of **0.38**. The real move between deciding on a bar's close and filling at
+the next open cost ₹6.82 per entry where the 5bps assumption charges ₹17.87, so
+the model is roughly 2.6x conservative on this component. In 21 of 66 sessions
+the gap was net *favourable* — the next bar opened in the trade's direction.
+
+That makes the paper P&L slightly pessimistic, not optimistic, and it changes
+nothing about the verdict: the stack loses ₹4,495 **before** costs, and no
+slippage assumption fixes a system that loses gross.
+
 A passing ratio establishes one thing: that the assumption covers the
 decision-to-fill move. It does **not** cover what `PaperBroker` openly does not
 simulate — market impact, partial fills, queue position, rejection, or a scrip
