@@ -1322,3 +1322,95 @@ class TestWorstCaseBudget:
         assert not blocked.allowed, "should refuse without banked profit"
         assert ahead.realised_pnl > 0
         assert allowed.allowed, "realised profit should extend the budget"
+
+
+# ------------------------------------------------------------------- neural
+class TestNeuralHonesty:
+    """The guards that stop a learned model from lying, tested as guards.
+
+    A model with a lookahead leak reports a wonderful score and no error. The
+    only way to trust the causal construction is to break it deliberately and
+    confirm the break is visible.
+    """
+
+    def _panel(self, n_days=420, n_syms=60, seed=3):
+        rng = np.random.default_rng(seed)
+        dates = pd.bdate_range("2024-01-01", periods=n_days)
+        rets = rng.normal(0.0004, 0.02, size=(n_days, n_syms))
+        close = pd.DataFrame(100 * np.exp(np.cumsum(rets, axis=0)), index=dates,
+                             columns=[f"S{i:03d}" for i in range(n_syms)])
+        return close
+
+    def test_label_is_strictly_forward_of_the_features(self):
+        """The label must describe a future the features cannot contain."""
+        from kabali.xsection.neural import HORIZON, build_features
+
+        close = self._panel()
+        x, y = build_features(close)
+        d = x.index.get_level_values("date")
+        sym = x.index.get_level_values("symbol")[0]
+        one = y.xs(sym, level="symbol")
+        # The label at t equals the realised return from t to t+HORIZON.
+        col = close[sym]
+        for t in list(one.index)[:5]:
+            i = col.index.get_loc(t)
+            expected = col.iloc[i + HORIZON] / col.iloc[i] - 1.0
+            assert one.loc[t] == pytest.approx(expected, rel=1e-9)
+        assert d.max() <= close.index[-1]
+
+    def test_a_deliberate_leak_is_visible_as_an_implausible_score(self):
+        """Break causality on purpose; the score must become absurd.
+
+        If a leaked label did NOT score far above a clean one, the pipeline would
+        be insensitive to lookahead -- and every honest-looking result it produced
+        would be worthless.
+        """
+        from kabali.xsection.neural import build_features, walk_forward
+
+        close = self._panel()
+        x_ok, y_ok = build_features(close, leak=False)
+        x_bad, y_bad = build_features(close, leak=True)
+
+        small = dict(n_folds=2, seed=1, min_train_dates=15,
+                     min_train_rows=400, min_test_rows=100)
+        clean = walk_forward(x_ok, y_ok, "clean", **small)
+        leaked = walk_forward(x_bad, y_bad, "leaked", **small)
+
+        assert abs(clean.mean_ic) < 0.15, f"random panel scored {clean.mean_ic}"
+        assert leaked.mean_ic > clean.mean_ic + 0.15, (
+            f"a deliberate leak scored {leaked.mean_ic:+.4f} against a clean "
+            f"{clean.mean_ic:+.4f} -- the pipeline cannot see lookahead")
+
+    def test_folds_are_chronological_and_never_overlap(self):
+        """Test windows must move forward in time and not revisit training dates."""
+        from kabali.xsection.neural import build_features, walk_forward
+
+        x, y = build_features(self._panel())
+        rep = walk_forward(x, y, "chrono", n_folds=3, seed=2, min_train_dates=15,
+                           min_train_rows=400, min_test_rows=100)
+        assert len(rep.folds) >= 2
+        starts = [f.test_start for f in rep.folds]
+        assert starts == sorted(starts), "test windows are not chronological"
+        for f in rep.folds:
+            assert f.train_end < f.test_start, (
+                f"fold {f.fold} trains through {f.train_end} but tests from "
+                f"{f.test_start}")
+
+    def test_a_panel_too_short_raises_rather_than_returning_nan(self):
+        """Silence is the failure mode; a number-shaped absence is worse."""
+        from kabali.xsection.neural import (
+            InsufficientHistory, build_features, walk_forward,
+        )
+
+        x, y = build_features(self._panel(n_days=300, n_syms=20))
+        with pytest.raises(InsufficientHistory, match="no fold met the minimums"):
+            walk_forward(x, y, "tiny", n_folds=3)
+
+    def test_noise_panel_scores_near_zero(self):
+        """The null the whole method rests on."""
+        from kabali.xsection.neural import build_features, walk_forward
+
+        x, y = build_features(self._panel(seed=11))
+        rep = walk_forward(x, y, "noise", n_folds=2, seed=5, min_train_dates=15,
+                           min_train_rows=400, min_test_rows=100)
+        assert abs(rep.mean_ic) < 0.15
