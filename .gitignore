@@ -5,5 +5,6 @@ data/
 runs/
 state/*
 !state/.gitkeep
-# Never commit the gate: it is the switch that permits real orders.
+# Never commit either authorisation: they are the switches that permit real orders.
 state/LIVE_GATE.json
+state/SMOKE_TEST.json
