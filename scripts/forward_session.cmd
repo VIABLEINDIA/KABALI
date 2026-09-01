@@ -19,4 +19,9 @@ echo ============================================================ >> "%LOG%"
 echo forward session started %date% %time% >> "%LOG%"
 C:\Python314\python.exe "%REPO%\scripts\daily.py" >> "%LOG%" 2>&1
 echo forward session exited with %ERRORLEVEL% at %time% >> "%LOG%"
+
+REM Summarise into runs\LATEST_SESSION.txt and raise a desktop toast. A
+REM scheduled task finishes into an empty room; the result is four screens up
+REM from the end of a log nobody has open.
+C:\Python314\python.exe "%REPO%\scripts\session_summary.py" --notify >> "%LOG%" 2>&1
 endlocal
