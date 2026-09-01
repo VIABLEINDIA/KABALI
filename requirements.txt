@@ -1,0 +1,13 @@
+# KABALI runtime. Versions are the ones this was built and tested against.
+dhanhq>=2.2.0
+pandas>=2.3
+numpy>=2.0
+pyarrow>=15.0
+PyYAML>=6.0
+requests>=2.32
+pytest>=8.0
+
+# Supplied by the ULTIMATE research core (imported, not vendored):
+#   research.costs / datastore / dhan_client / instruments / indicators /
+#   backtest / metrics / robustness
+# Point KABALI_ULTIMATE_ROOT at that checkout.
