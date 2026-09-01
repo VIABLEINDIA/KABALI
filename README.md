@@ -345,49 +345,55 @@ not seen.
 
 ## What it actually did
 
-Walk-forward paper replay, 64 sessions (2026-06-01 → 2026-08-28), 120 names
-scanned daily, regime and universe recomputed as-of each morning.
-Reproduce with `python scripts/run_paper.py --days 90 --symbols 120`.
+Walk-forward paper replay, 66 sessions (2026-06-01 → 2026-09-01), 250 names
+scanned daily, regime and universe recomputed as-of each morning. This is the
+promoted record (`runs/paper_promote`, code `3d2f8a4b776d`) — the evidence the
+gate scores. Reproduce with
+`python scripts/run_paper.py --days 60 --symbols 250 --promote`.
 
 | | |
 |---|---|
-| Sessions | 64 |
-| Round trips | 403 |
-| Win rate | 38.5% |
-| **Gross P&L** | **−₹3,078** |
-| Costs | ₹7,578 |
-| **Net P&L** | **−₹10,656 (−26.6% on ₹40,000)** |
-| Worst session | −₹762 (limit ₹800 — held) |
-| Sessions breaching the daily limit | **0 / 64** |
+| Sessions | 66 |
+| Round trips | 426 |
+| Win rate | 36.9% |
+| **Gross P&L** | **−₹4,495** |
+| Costs | ₹8,072 |
+| **Net P&L** | **−₹12,568 (−31.4% on ₹40,000)** |
+| Worst session | −₹755 (limit ₹800 — held) |
+| Sessions breaching the daily limit | **0 / 66** |
+| Halted sessions | 16 |
 
 **The risk engine works. The strategies do not.**
 
 Two separate readings, and conflating them is the mistake to avoid:
 
-**It loses before costs.** Gross is −₹3,078, so this is not a fee problem with a
-good signal underneath. Costs then triple the loss — ₹7,578 over 403 round trips
-is 19% of capital in friction across one quarter — but removing them entirely
-still leaves a losing system.
+**It loses before costs.** Gross is −₹4,495, so this is not a fee problem with a
+good signal underneath. Costs then nearly triple the loss — ₹8,072 over 426 round
+trips is 20% of capital in friction across one quarter — but removing them
+entirely still leaves a losing system.
 
 **Every rule sits below its own breakeven win rate:**
 
 | Strategy | Trades | Payoff | Needs | Got | Shortfall |
 |---|---|---|---|---|---|
-| VWAPReversion | 333 | 1.23 | 44.8% | 37.2% | −7.5pp |
-| OpeningRangeBreakout | 48 | 0.99 | 50.2% | 41.7% | −8.6pp |
-| VWAPPullback | 6 | 0.49 | 67.3% | 16.7% | −50.7pp |
-| GapFade | 10 | — | — | 80% | +₹258, sample too small |
-| MomentumBurst | 5 | — | — | 40% | +₹42, sample too small |
+| VWAPReversion | 346 | 1.27 | 44.0% | 35.3% | −8.8pp |
+| OpeningRangeBreakout | 53 | 1.06 | 48.6% | 39.6% | −9.0pp |
+| VWAPPullback | 6 | 0.45 | 69.2% | 16.7% | −52.5pp |
+| GapFade | 21 | 0.86 | 53.7% | 61.9% | +8.2pp, sample too small |
 
-The two profitable rules have 15 trades between them. That is not evidence.
+The whole stack needs 45.7% and gets 36.9%. GapFade is the only rule above its
+own line and it has 21 trades; at that sample a coin flip clears 62% about one
+time in ten. MomentumBurst did not fire at all in this replay, which is itself
+the point — a rule whose sample vanishes when the universe changes was never
+measuring anything stable.
 
 **By regime** — negative in three of four buckets, the fourth being 3 sessions:
 
 | Regime | Sessions | Net | Per session |
 |---|---|---|---|
-| neutral_range | 31 | −₹5,753 | −₹186 |
+| neutral_range | 33 | −₹7,599 | −₹230 |
 | bear_range | 20 | −₹3,094 | −₹155 |
-| neutral_trend | 10 | −₹1,900 | −₹190 |
+| neutral_trend | 10 | −₹1,966 | −₹197 |
 | bear_trend | 3 | +₹91 | +₹30 |
 
 This reproduces ULTIMATE's intraday finding — *"every regime bucket is negative;
@@ -396,7 +402,7 @@ and an independently written engine.
 
 **Nothing here has been tuned to improve these numbers, and nothing should be.**
 Reading the table and adjusting parameters until it turns positive is fitting to
-64 sessions. That is exactly the process that produced zero robust regions from
+66 sessions. That is exactly the process that produced zero robust regions from
 6,036 configurations.
 
 ### Bugs this replay caught
@@ -435,8 +441,8 @@ one: it takes a single instrument's bars. So `kabali/xsection/` is new.
 
 **The frequency arithmetic, which was the point.** Delivery costs *more* per
 trade than intraday -- 28bps round trip against 19bps -- but a monthly rebalance
-does 311 round trips over four years where the intraday stack did 403 in one
-quarter. Friction falls from 19% of capital per quarter to 5.6% over four years.
+does 311 round trips over four years where the intraday stack did 426 in one
+quarter. Friction falls from 20% of capital per quarter to 5.6% over four years.
 
 **The data was already on disk.** 608 NSE names carry the full five years from the
 universe builder's staged ingest. No new fetch, no rate limit, and a window
@@ -514,8 +520,8 @@ promoted into a headline.
 
 ### How this differs from the intraday verdict
 
-The intraday result was **clearly negative** — it lost before costs and every
-rule sat below its breakeven win rate. This one is **not proven**, which is a
+The intraday result was **clearly negative** — it lost before costs and the
+stack sat 8.8 points below its breakeven win rate. This one is **not proven**, which is a
 different thing and should not be rounded to either "it works" or "it failed":
 
 - the point estimate is positive and consistently so across configurations;
