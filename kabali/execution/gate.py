@@ -47,6 +47,7 @@ decision is made, so that going live is always a deliberate act.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -54,6 +55,8 @@ import pandas as pd
 
 from kabali.config import STATE_DIR
 from kabali.execution import provenance
+
+log = logging.getLogger(__name__)
 
 # The evidence the gate scores. One path, so a caller cannot hand the gate a
 # record from somewhere else and have it scored as though it were promoted.
@@ -120,16 +123,34 @@ class GateCriteria:
 
 @dataclass
 class GateVerdict:
-    """Per-criterion result. `passed` only when every check passed."""
+    """Per-criterion result, plus any failures the operator explicitly waived.
+
+    A waived check still reports FAIL. Nothing about a waiver changes what the
+    evidence says -- it records that a person read the failure and proceeded.
+    The distinction matters because the alternative, editing thresholds until
+    they pass, leaves a system that looks validated and a record that lies.
+    """
 
     checks: dict[str, tuple[bool, str]] = field(default_factory=dict)
     evidence: dict = field(default_factory=dict)
+    waivers: dict[str, str] = field(default_factory=dict)
 
     def add(self, name: str, ok: bool, detail: str) -> None:
         self.checks[name] = (ok, detail)
 
     @property
+    def unwaived_failures(self) -> list[str]:
+        return [f"{n}: {d}" for n, (ok, d) in self.checks.items()
+                if not ok and n not in self.waivers]
+
+    @property
     def passed(self) -> bool:
+        """True when nothing failed that was not explicitly waived."""
+        return bool(self.checks) and not self.unwaived_failures
+
+    @property
+    def clean(self) -> bool:
+        """True only when nothing failed at all. What `passed` used to mean."""
         return bool(self.checks) and all(ok for ok, _ in self.checks.values())
 
     @property
@@ -137,9 +158,19 @@ class GateVerdict:
         return [f"{n}: {d}" for n, (ok, d) in self.checks.items() if not ok]
 
     def render(self) -> str:
-        lines = [f"LIVE GATE: {'PASS' if self.passed else 'FAIL'}"]
+        if self.clean:
+            head = "LIVE GATE: PASS"
+        elif self.passed:
+            head = (f"LIVE GATE: OPEN ON {len(self.waivers)} WAIVED FAILURE(S) "
+                    f"-- the evidence does NOT support this")
+        else:
+            head = "LIVE GATE: FAIL"
+        lines = [head]
         for name, (ok, detail) in self.checks.items():
-            lines.append(f"  [{'PASS' if ok else 'FAIL'}] {name}: {detail}")
+            tag = "PASS" if ok else ("WAIVED" if name in self.waivers else "FAIL")
+            lines.append(f"  [{tag}] {name}: {detail}")
+        for name, why in self.waivers.items():
+            lines.append(f"  ! waived {name}: {why}")
         return "\n".join(lines)
 
 
@@ -294,6 +325,25 @@ class LiveGate:
               "confirmation phrase present" if confirm == CONFIRMATION_PHRASE
               else f"confirm must be exactly {CONFIRMATION_PHRASE!r}")
 
+        # Waivers are read here and applied at the end, so every criterion is
+        # still evaluated and still reports what the evidence says.
+        waived = raw.get("waived") or {}
+        if not isinstance(waived, dict):
+            raise GateClosed("gate file 'waived' must be an object of "
+                             "{criterion: reason}")
+        for name, why in waived.items():
+            if name not in WAIVABLE:
+                raise GateWaiverRefused(
+                    f"'{name}' may never be waived. Waivable: "
+                    f"{', '.join(sorted(WAIVABLE))}. A failure outside that set "
+                    f"means the machinery is wrong or the evidence is not about "
+                    f"this system, and neither is a thing consent can fix.")
+            if not str(why).strip():
+                raise GateWaiverRefused(
+                    f"waiving '{name}' requires a written reason; an empty one "
+                    f"records nothing for whoever reads this later")
+            v.waivers[name] = str(why).strip()
+
         if sessions is None:
             sessions = self.load_record()
         if sessions is None or sessions.empty:
@@ -310,16 +360,31 @@ class LiveGate:
         ok, detail = provenance.verify(self.record_path, sessions, self.cfg)
         v.add("provenance", ok, detail)
         v.evidence["provenance"] = provenance.read(self.record_path) or {}
+
+        # A waiver on a criterion that PASSED is almost certainly a stale entry
+        # left behind after the evidence improved. Drop it rather than leave a
+        # record claiming a failure was overridden when nothing failed.
+        for name in [n for n in v.waivers if v.checks.get(n, (False,))[0]]:
+            del v.waivers[name]
+        if v.waivers:
+            v.evidence["waived"] = dict(v.waivers)
+            log.warning("LIVE GATE opened over %d waived failure(s): %s",
+                        len(v.waivers), ", ".join(sorted(v.waivers)))
         return v
 
     def require_open(self, sessions: pd.DataFrame | None = None,
                      now: pd.Timestamp | None = None) -> GateVerdict:
-        """Raise `GateClosed` unless every check passes."""
+        """Raise `GateClosed` unless every check passes or was explicitly waived."""
         v = self.check(sessions, now=now)
         if not v.passed:
             raise GateClosed(
                 "live trading refused; the gate is closed.\n" + v.render()
             )
+        if v.waivers:
+            log.warning(
+                "PROCEEDING OVER WAIVED EVIDENCE. %s. The record still says this "
+                "system is not profitable; nothing about the waiver changed that.",
+                "; ".join(f"{k}: {w}" for k, w in sorted(v.waivers.items())))
         return v
 
     def template(self) -> dict:
