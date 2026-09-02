@@ -36,6 +36,21 @@ that assumes the edge is there. Every component that could manufacture a fake
 edge — lookahead, optimistic fills, uncosted trades, unbounded risk — is closed
 off deliberately, and the live gate will not open on hope.
 
+**Both hypotheses it was built to test have now been answered, and neither
+supports trading this account.**
+
+| Hypothesis | Verdict |
+|---|---|
+| Intraday multi-strategy stack | **Negative.** −₹3,923 *before* costs over 66 sessions and 424 round trips. Every rule sits below its own breakeven win rate, so it is not a friction problem with a good signal underneath. |
+| Cross-sectional momentum | **Real, but unreachable.** The signal is strong long-short (+28.12%/yr, t = 5.92 over 16.6 survivorship-free years) and fails long-only after costs (Sharpe 0.64 against the benchmark's 0.66). |
+
+The benchmark in that second row is the finding worth carrying: an equal-weight
+hold of every liquid NSE name returned **13.12%/yr at Sharpe 0.66** over the same
+period, with no ranking, no turnover and no costs. It is the best-performing
+strategy anywhere in this repository.
+
+The live gate is closed. Nothing here recommends opening it.
+
 ## Install
 
 ```bash
@@ -63,8 +78,23 @@ python cli.py gate                                    # can this go live? (it wi
 python scripts/run_live.py                            # forward session, paper, on live data
 python scripts/daily.py                               # refresh + session + gate, one command
 
-python scripts/run_xsection.py --random 200 --grid --controls   # cross-sectional study
+python scripts/run_xsection.py --random 200 --grid --controls   # first cross-sectional study
 ```
+
+The cross-sectional line, which is settled — see
+[`docs/xsection_hypothesis.md`](docs/xsection_hypothesis.md):
+
+```bash
+python scripts/build_bhavcopy_panel.py --start 2006-01-01   # 20y panel (~1h cold, then seconds)
+python scripts/power_xsection.py                            # how long a sample the test needs
+python scripts/run_stage1.py                                # does the signal exist
+python scripts/run_stage2.py --spread                       # is it tradable long-only
+```
+
+The panel download is one hour once and fully resumable; every day-file and
+action window is cached, so rebuilding afterwards takes about four minutes with
+`--no-fetch`. `run_stage1.py` **refuses** a panel shorter than 15 years and exits
+2, because the power analysis shows a shorter one cannot settle the question.
 
 `scripts/daily.py` is the once-a-morning entry point. Windows Task Scheduler:
 
@@ -320,12 +350,17 @@ on a live feed remains a genuine prerequisite.
 ```
 cli.py                     health / regime / universe / gate / signals
 config/bot.yaml            every risk decision, in one file
+docs/       swing_hypothesis.md      pre-registration: swing momentum
+            xsection_hypothesis.md   pre-registration + result: cross-sectional
 kabali/
   core.py                  bridge to ULTIMATE (costs, data, indicators, backtest)
   config.py                typed config, validated on load
   data/       ingest.py    staged parallel history ingest, rate-limited
               cache.py     offline parquet reads (post-ingest stages never fetch)
               intraday.py  session splitting, as-of daily context
+              bhavcopy.py  NSE daily archive, three schemas, survivorship-free
+              corpactions.py  split/bonus factors, parsed AND price-confirmed
+              panel.py     identity across renames + ISIN changes; wide panels
   universe/   factors.py   per-symbol factors, causal
               selector.py  gates + regime-aware cross-sectional scoring
   regime/     classifier.py  direction x family, from NIFTY + breadth
@@ -333,22 +368,35 @@ kabali/
               opening_range.py vwap_pullback.py momentum_burst.py
               vwap_reversion.py gap_fade.py registry.py (router)
   risk/       book.py sizing.py circuit.py
-  execution/  broker.py paper.py gate.py dhan_live.py
+  execution/  broker.py paper.py gate.py dhan_live.py provenance.py
   xsection/   panel.py     aligned daily panel + data-quality screen
               momentum.py  12-1 ranking, parameters pre-committed
               portfolio.py monthly rebalance, delivery costs, whole shares
               evaluate.py  alpha/beta split and the random-ranking null
               controls.py  synthetic panels with a planted edge, or none
+              stage1.py    decile spread + Fama-MacBeth, Newey-West errors
+              stage2.py    long-only tradability against a beta-matched hold
+              neural.py    a neural cross-sectional model, and the null it returns
+  swing/      strategy.py panel.py portfolio.py benchmark.py
+  fundamentals/ store.py   valuation data for the traded head of the universe
   engine/     session.py   one day, replay-driven
               live.py      same stages, clock-driven
-scripts/    build_universe.py   5y ingest + daily selection
-            run_paper.py        walk-forward replay -> the paper record
-            run_live.py         one forward session (paper, or gated live)
-            daily.py            refresh + session + gate status
-            analyze.py          payoff / breakeven diagnosis of a run
-            run_xsection.py     cross-sectional momentum study
-tests/      test_kabali.py      82 tests
-            test_xsection.py    28 tests, weighted to lookahead and cash safety
+scripts/    build_universe.py       5y ingest + daily selection
+            build_bhavcopy_panel.py 20y survivorship-free panel from NSE archive
+            power_xsection.py       volatility-only power analysis (never the mean)
+            run_paper.py            walk-forward replay -> the paper record
+            run_live.py             one forward session (paper, or gated live)
+            daily.py                refresh + session + gate status
+            analyze.py              payoff / breakeven diagnosis of a run
+            render_results.py       regenerate the README from the record
+            run_xsection.py         first cross-sectional study
+            run_stage1.py           does the signal exist (sample-length guarded)
+            run_stage2.py           is it tradable long-only
+            run_swing.py run_neural.py diagnose.py repair_cache.py
+tests/      test_kabali.py          104 tests
+            test_xsection.py         28 tests, weighted to lookahead and cash safety
+            test_bhavcopy_panel.py   26 tests, weighted to silent-failure modes
+            test_stage1.py           10 tests, estimators against known answers
 ```
 
 ## Reading a result
@@ -377,7 +425,7 @@ not seen.
 
 <!-- BEGIN GENERATED RESULTS -- scripts/render_results.py -->
 
-Walk-forward paper replay, 66 sessions (2026-06-01 → 2026-09-01), 250 names scanned daily, regime and universe recomputed as-of each morning. This is the promoted record (`runs\paper_newuniverse`, code `29ede7822950`) — the evidence the gate scores. Reproduce with
+Walk-forward paper replay, 66 sessions (2026-06-01 → 2026-09-01), 250 names scanned daily, regime and universe recomputed as-of each morning. This is the promoted record (`runs\paper_final_repromote`, code `49c0b130e100`) — the evidence the gate scores. Reproduce with
 `python scripts/run_paper.py --days 60 --symbols 250 --promote`.
 
 | | |
@@ -423,7 +471,7 @@ Walk-forward paper replay, 66 sessions (2026-06-01 → 2026-09-01), 250 names sc
 | neutral_trend | 10 | −₹1,195 | −₹119 |
 | bear_trend | 3 | +₹91 | +₹30 |
 
-<sub>Generated from `state/paper_record.csv` (promoted 2026-09-01T22:57, config `69ebf0fdb476`). Do not edit by hand — run `scripts/render_results.py --write`.</sub>
+<sub>Generated from `state/paper_record.csv` (promoted 2026-09-02T00:05, config `9fb4863b88c9`). Do not edit by hand — run `scripts/render_results.py --write`.</sub>
 
 <!-- END GENERATED RESULTS -->
 
@@ -476,130 +524,141 @@ costs and then paid 19% of capital a quarter in friction, so the natural next te
 had to change both things at once: a different signal construction, and a holding
 period long enough that friction stops dominating.
 
-```bash
-python scripts/run_xsection.py --random 200 --grid --controls
-```
-
 **What is different about it.** Every one of ULTIMATE's 6,036 configurations and
-all five of KABALI's intraday rules are *time-series* rules -- each symbol judged
-against its own history. This ranks symbols against *each other* and holds the
-top ten, rebalanced monthly, long-only, on delivery. Nothing in either codebase
-had tested a cross-sectional construction, and `research.backtest` cannot express
-one: it takes a single instrument's bars. So `kabali/xsection/` is new.
+all five of KABALI's intraday rules are *time-series* rules — each symbol judged
+against its own history. This ranks symbols against *each other*. Nothing in
+either codebase had tested a cross-sectional construction, and `research.backtest`
+cannot express one: it takes a single instrument's bars. So `kabali/xsection/` is
+new.
 
-**The frequency arithmetic, which was the point.** Delivery costs *more* per
-trade than intraday -- 28bps round trip against 19bps -- but a monthly rebalance
-does 311 round trips over four years where the intraday stack did 426 in one
-quarter. Friction falls from 20% of capital per quarter to 5.6% over four years.
+This question is now **settled**, and settling it took three steps: a first run
+whose null turned out to mean nothing, a twenty-year panel built to fix that, and
+a two-stage pre-registered test. The pre-registration and its result are in
+[`docs/xsection_hypothesis.md`](docs/xsection_hypothesis.md).
 
-**The data was already on disk.** 608 NSE names carry the full five years from the
-universe builder's staged ingest. No new fetch, no rate limit, and a window
-spanning several regime eras rather than one quarter.
+### Step 1: the first run, and why its null meant nothing
 
-### Result: no demonstrable edge, and the reason is instructive
-
-| | Strategy | Equal-weight panel | Difference |
-|---|---|---|---|
-| Total return | 215.2% | 145.1% | +70.1pp |
-| CAGR | 33.5% | 25.3% | +8.2pp |
-| Sharpe | 1.24 | **1.40** | **−0.16** |
-| Max drawdown | 38.0% | **22.4%** | **+15.6pp** |
-| Costs | ₹2,253 (5.6% over 4y) | — | |
-
-The benchmark is an equal-weight hold of the *identical* 606 names over the
-*identical* window, so it carries exactly the same survivorship bias and
-subtracting it cancels most of that bias rather than arguing about its size.
-
-Read only the first row and this looks like a win. The next two rows say
-otherwise: more return, worse risk-adjusted return, and nearly double the
-drawdown. Two further tests separate the explanations.
-
-**Random-ranking null** — the same engine, the same eligibility mask, the same
-costs, ranking names at random, 200 times:
-
-| p5 | p25 | median | p75 | p95 | strategy |
-|---|---|---|---|---|---|
-| 41.7% | 64.9% | 89.1% | 122.0% | 171.1% | **215.2%** |
-
-Momentum beats all 200 draws. Concentration alone does not explain it, so the
-ranking is doing something.
-
-**What the ranking is doing is buying beta.** Regressing daily strategy returns
-on the benchmark splits the outperformance in two:
+On 606 names over 3.9 years, a ten-name monthly-rebalanced book returned 215.2%
+against 145.1% for an equal-weight hold of the identical names — but with a
+*worse* Sharpe (1.24 against 1.40) and nearly double the drawdown. Regression
+split the outperformance cleanly:
 
 | | beta | alpha %/yr | t(alpha) |
 |---|---|---|---|
 | Negative control (no edge planted) | 0.98 | −12.3 | −2.40 |
 | Positive control (edge 0.02) | 0.98 | +16.5 | **3.17** |
-| Positive control (edge 0.03) | 0.98 | +26.1 | **5.01** |
-| **Real NSE panel** | **1.18** | +3.9 | **0.46** |
+| **Real panel** | **1.18** | +3.9 | **0.46** |
 
-Beta is 1.18 with t = 5.99 against 1.0 — overwhelming. Alpha is +3.9%/yr with
-t = 0.46 — indistinguishable from zero. The strategy systematically picks
-higher-beta names, and in a four-year bull market high beta beats random
-selection without any skill being involved.
+Beta 1.18 with t = 5.99; alpha t = 0.46. It was recorded as "not proven".
 
-The controls are what make that null mean something. The same method finds a
-*modest* planted edge at t = 3.17 and correctly reports negative alpha on pure
-noise, so it is powered to see an edge of the size that would matter. Note also
-that a planted edge leaves beta at 0.98 — real alpha does not inflate beta. Only
-the real panel's does, which is the tell.
+**That reading gave the number more credit than it deserved.** Back out the
+standard error: alpha 3.90%/yr at t = 0.46 implies SE 8.50%/yr, so a ten-name
+portfolio carries 17.0%/yr of residual volatility. The smallest alpha that design
+could ever have called significant was **17%/yr**, and detecting the alpha it
+actually measured would have taken **75 years**. No momentum system in the
+literature produces 17%/yr of net alpha. The test could only have passed by luck.
 
-**Every configuration, not the best one:**
+`scripts/power_xsection.py` measures the ceiling on fixing that statistically —
+reporting the *volatility* of candidate estimators while never forming their mean,
+so the experiment can be sized without revealing the answer. Even a beta-neutral
+100×100 long-short spread needs **22 years** for a 5%/yr effect. Better statistics
+take the requirement from 75 years to 22; they do not take it to four.
 
-| N | rebal | total % | Sharpe | beta | alpha %/yr | t |
-|---|---|---|---|---|---|---|
-| 5 | 21d | 221.8 | 1.13 | 1.16 | 6.2 | 0.53 |
-| 5 | 63d | 373.2 | 1.44 | 1.18 | 15.7 | 1.34 |
-| 10 | 21d | 215.2 | 1.24 | 1.18 | 3.9 | 0.46 |
-| 10 | 63d | 169.7 | 1.08 | 1.21 | −0.8 | −0.09 |
-| 20 | 21d | 202.2 | 1.30 | 1.18 | 2.2 | 0.35 |
-| 20 | 63d | 237.6 | 1.44 | 1.14 | 5.9 | 0.94 |
-| 30 | 21d | 226.1 | 1.43 | 1.16 | 4.3 | 0.78 |
-| 30 | 63d | 264.0 | 1.56 | 1.15 | 7.4 | 1.32 |
-| 50 | 21d | 191.1 | 1.49 | 1.01 | 4.4 | 1.01 |
-| 50 | 63d | 211.1 | 1.57 | 1.03 | 5.7 | 1.38 |
+The binding constraint was data, not method.
 
-Alpha is positive in nine of ten cells and significant in none. The largest
-t-statistic is 1.38, which is unremarkable as the best of ten attempts — that is
-roughly what the null produces. Parameters were fixed before the first run and
-this grid is reported whole, precisely so the 373% cell cannot be quietly
-promoted into a headline.
+### Step 2: the panel that made a test possible
 
-### How this differs from the intraday verdict
+`kabali/data/bhavcopy.py` builds a **survivorship-free 20-year panel** from NSE's
+daily archive: 5,100 sessions × 3,847 companies, 2006-01-02 to 2026-09-01. It is
+an as-of-the-date snapshot, so a company that vanished in 2009 is present in every
+file printed before it vanished — **470 companies present in 2006 and gone by 2026
+are retained**, exactly the names a today's-listings panel silently drops.
 
-The intraday result was **clearly negative** — it lost before costs and the
-stack sat 8.8 points below its breakeven win rate. This one is **not proven**, which is a
-different thing and should not be rounded to either "it works" or "it failed":
+Four things had to be established by probing rather than assumed:
 
-- the point estimate is positive and consistently so across configurations;
-- it never reaches significance over this sample;
-- survivorship bias flatters it, so the true figure is likely lower;
-- four years, and one bull market, is one regime era again.
+| Finding | Why it mattered |
+|---|---|
+| History reaches 2005, not 2019 | The archive answers unprimed clients with `403` and an empty body, indistinguishable from "no such file". Taking it at face value caps the panel at seven years. |
+| Bhavcopy is unadjusted, and `prev_close` does not help | Measured: across 90,525 day-pairs it equals the raw prior close 99.98% of the time, including on every confirmed split. A 1:10 split enters a ranking as a −90% return. |
+| A split changes the ISIN | FEDERALBNK is `INE171A01011` before its 2015 bonus and `INE171A01029` after. Keying on ISIN severs history at the actions being corrected for; symbols fail too (AEGISLOG → AEGISCHEM). Identity resolves as connected components over the (symbol, ISIN) graph. |
+| NSE files an action under the ISIN it retires | So an ISIN-only join drops precisely the splits that matter most. Resolving to entity *before* confirming took the confirmation rate from 38.9% to 100% on the test quarter. |
 
-**The live gate stays closed, and no cross-sectional path to it exists.** Nothing
+A parsed corporate-action factor is treated as a hypothesis and confirmed against
+the price jump actually observed on the ex-date; 95.3% confirm, 60 are
+contradicted and **refused rather than applied**. A jump no action explains has the
+name's prior history blanked rather than a factor guessed from the jump itself —
+because a 1:2 split and a stock halving are the same number.
+
+### Step 3: the pre-registered test
+
+Two stages, both fixed in writing before either ran, with all three outcomes
+(PASS / FAIL / INCONCLUSIVE) named in advance.
+
+**Stage 1 — does the signal exist? PASS.**
+
+```
+decile spread 100x100  +28.12%/yr  t=+5.92 (Newey-West)  95% CI [+18.8, +37.4]
+Fama-MacBeth           +1.32%/period  t=+2.05
+halves                 first +33.14%/yr (t=+4.97), second +28.47%/yr (t=+4.63)
+```
+
+Long-short, so market beta is removed by construction rather than regressed away.
+Against an equal-weight hold of the eligible universe (+14.46%/yr), the long leg
+beats by **+12.05pp** and the short leg lags by **−16.07pp** — roughly symmetric,
+on liquid names (median turnover ₹9.2cr and ₹6.4cr at formation). The tested span
+is 16.6 years, not 20.7: a rebalance needs 400 eligible names and NSE does not
+supply them before 2010.
+
+**Stage 2 — is it tradable long-only? FAIL.**
+
+| | Total | CAGR | Sharpe | maxDD |
+|---|---|---|---|---|
+| Strategy (N=10, ₹40k) | +1104.9% | +13.51% | **0.64** | 72.8% |
+| Equal-weight eligible | +1027.3% | +13.12% | **0.66** | 74.3% |
+| Benchmark × beta 0.75 | +585.8% | +10.30% | 0.66 | 63.3% |
+
+Alpha +4.51%/yr at t = 1.11 — positive and insignificant, the identical shape the
+first run produced. 1,507 fills cost ₹22,225, **55.6% of capital** over 16.6 years.
+
+Variants at N=20 pass. The pre-registration fixed the rule before any of it ran:
+**if the primary fails and a variant passes, the hypothesis has failed** and the
+variant is a new hypothesis needing its own sample. The passing cells do not
+survive scrutiny anyway — Sharpe rises with N because the ~600-name benchmark sits
+at 0.66 and the strategy only approaches it as N grows, which is diversification
+recovering rather than selection skill; no alpha t reaches 2 except one, the best
+of eight cells; and the ordering is not even monotonic.
+
+### What this settles
+
+**The edge is real and the money cannot reach it.** Sixteen of the spread's
+twenty-eight points are the short leg, and CNC cannot short. Of the twelve that
+remain, costs take 3.3%/yr, and what survives does not clear a Sharpe bar against
+simply holding the eligible universe equal-weight — which returned 13.12%/yr at
+Sharpe 0.66 with no ranking, no turnover and no costs.
+
+That last comparison is the useful one, and it is the best-performing strategy
+anywhere in this repository.
+
+**The live gate is untouched, and no cross-sectional path to it exists.** Nothing
 in `kabali/xsection/` can place an order; it is research code with no execution
 surface at all.
 
-What would actually settle it: a survivorship-corrected panel including delisted
-names (a multi-hour ingest against the Dhan rate limit), and a window covering at
-least one full bear market. Until then this is a hypothesis with a positive prior
-and insufficient evidence — not an edge.
+### Data defects these studies caught
 
-### Data defects this study caught
-
-Both were found by looking at the data rather than by reading code, and both
-would have manufactured signal rather than crashing:
+Found by looking at the data rather than by reading code, and all would have
+manufactured signal rather than crashing:
 
 | Defect | What it would have done |
 |---|---|
-| HATSUN prints ₹468 between two ₹900 sessions | `research.corporate_actions` reads it as a 2:1 split — its open-confirms check passes because the corrupt bar's *open* is corrupt too — and back-adjusts a year of history, showing the ranking a stock that doubled overnight |
+| HATSUN prints ₹468 between two ₹900 sessions | `research.corporate_actions` reads it as a 2:1 split — its open-confirms check passes because the corrupt bar's *open* is corrupt too — and back-adjusts a year of history |
 | MOTHERSON and LLOYDSENGG interleave whole sessions at two price scales, 62 and 31 times | A name that periodically jumps 50% sits at the top of a momentum sort on the strength of a data defect |
+| A bhavcopy parse failure cached as a *holiday* | Holidays are never retried, so 2006–2010 would have vanished from the panel silently. Only genuine absence is cached now. |
+| A quarantine threshold of −55%, set below the −50% a 1:2 split produces | It protected sub-rupee names already excluded by the ₹10 price floor, while letting every unadjusted 1:2 split through — 15 of them on eligible names, including MASTEK 834→380 and DABUR 73.65→36.02 |
 
-The fix is a persistence test: a split is permanent, a bad print reverts. Names
-with more than three reverting prints are dropped entirely; isolated ones are
-masked to NaN. Across 606 names this drops 2 and masks 23 bars, and it must run
-*before* corporate-action detection. 584 of 608 names were clean.
+The first two are fixed by a persistence test: a split is permanent, a bad print
+reverts. The last two only appeared at full scale — both were correct on the
+64-day slice they were first validated against, which is the pattern worth
+remembering.
 
 ## Known limitations
 
@@ -608,7 +667,9 @@ masked to NaN. Across 606 names this drops 2 and masks 23 bars, and it must run
 - **No market impact, partial fills, or exchange rejections** in paper. Circuit
   limits and scrip-level bans are not simulated at all.
 - **MIS leverage is assumed, not queried.** Dhan sets it per scrip and changes it.
-- **Survivorship.** The universe is drawn from names listed today.
+- **The intraday universe is survivorship-biased.** It is drawn from names listed
+  today. The bhavcopy panel is not — it retains 470 companies that delisted
+  between 2006 and 2026 — but nothing in the intraday path uses it.
 - **Selection pressure.** Every parameter in `config/bot.yaml` is a choice that
   was not swept. Sweeping them would raise the chance the best-looking setting is
   noise — which is what ULTIMATE's 6,036 configurations demonstrated.
@@ -620,17 +681,20 @@ masked to NaN. Across 606 names this drops 2 and masks 23 bars, and it must run
   regime era means a much longer ingest, and the rate limit makes that a
   multi-hour job, not a quick re-run.
 - **A negative paper result is weaker evidence than a positive one would be.**
-- **The cross-sectional panel is survivorship-biased.** Its 606 names are those
-  listed and liquid today. For a momentum rule the bias runs upward, so the
-  reported alpha is an overestimate and the null verdict is, if anything,
-  generous to the strategy.
-- **Cross-sectional t-statistics are plain OLS.** Daily returns are mildly
-  autocorrelated and heteroskedastic, so the true standard errors are wider than
-  reported and the alpha t of 0.46 is an optimistic reading, not a conservative
-  one.
-- **No dividends in the panel.** Total returns are understated by roughly the
-  yield -- close to neutral across a cross-sectional sort, but not zero.
-- **Four years is one regime era.** The cross-sectional window (2022-2026) was
-  predominantly a bull market in Indian mid caps; 82% of panel names ended
-  higher. Momentum has historically failed hardest at sharp reversals, and this
-  sample contains none.
+- **The cross-sectional test spans 16.6 years, not the panel's 20.7.** A
+  rebalance needs 400 eligible names and NSE does not supply them before 2010, so
+  2006–2010 contributes history to the formation windows but no rebalances.
+- **Even 16.6 years is a small number of independent macro episodes.** The window
+  contains one severe drawdown (2020) and no prolonged bear market. Momentum
+  fails hardest at sharp reversals off a bottom, and this sample is thin in
+  exactly that regime.
+- **No dividends in any panel.** Total returns are understated by roughly the
+  yield — close to neutral across a cross-sectional sort, but not zero.
+- **The quarantine rule removes real events along with bad data.** A one-day move
+  beyond −42% or +90% that no confirmed corporate action explains has the name's
+  prior history blanked. Genuine crashes of that size are rare but real, and they
+  are discarded. The choice is deliberate: it removes names from the sample
+  rather than inventing returns for them.
+- **Corporate-action coverage is NSE's.** 95.3% of priceable actions are
+  price-confirmed and 60 are contradicted and refused, but an action the feed
+  never carried can only be caught by the quarantine rule, not adjusted.
