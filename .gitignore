@@ -1,8 +1,11 @@
 __pycache__/
 *.pyc
 .pytest_cache/
-data/
-runs/
+# Anchored to the repo root on purpose. Unanchored, `data/` also matches
+# `kabali/data/` -- the package cli.py imports -- and silently kept the
+# whole data layer out of version control.
+/data/
+/runs/
 state/*
 !state/.gitkeep
 # Never commit either authorisation: they are the switches that permit real orders.
