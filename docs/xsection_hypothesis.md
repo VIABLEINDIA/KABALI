@@ -189,3 +189,104 @@ better backtest; that the confirmatory run happens once, after that, against
 the rules above; and that its result is published here whatever it says --
 including, most likely, that four years was never going to be enough and twenty
 may not be either.
+
+---
+
+# RESULT, 2026-09-02
+
+Recorded the same day the panel was built and the test run, against the rules
+fixed above. Nothing below was chosen after seeing a number.
+
+## The panel
+
+5,100 sessions x 3,847 entities, 2006-01-02 to 2026-09-01, from NSE bhavcopy.
+5,913 ISINs resolve to 3,847 companies (1,764 span more than one ISIN). 95.3% of
+priceable corporate actions price-confirmed, 60 contradicted and refused, 183
+entities quarantined for unexplained jumps. **470 companies present in 2006 and
+absent by 2026 are retained** -- the survivorship correction the precondition
+was about.
+
+## Stage 1: PASS
+
+```
+decile spread 100x100  +28.12%/yr  t=+5.92 (Newey-West)  95% CI [+18.8, +37.4]
+Fama-MacBeth           +1.32%/period  t=+2.05
+halves                 first +33.14%/yr (t=+4.97), second +28.47%/yr (t=+4.63)
+```
+
+16.6 years of testable spread (2010-02 to 2026-09; a rebalance needs 400
+eligible names and NSE does not supply them before 2010 -- the panel is 20.7
+years, the test is not).
+
+Decomposed against an equal-weight hold of the eligible universe (+14.46%/yr):
+the long leg beat it by **+12.05pp**, the short leg lagged by **-16.07pp**. The
+effect is roughly symmetric rather than one-sided, and the names involved are
+liquid -- median turnover at formation Rs 9.2cr long, Rs 6.4cr short.
+
+The two estimators disagree in magnitude (t = 5.92 against t = 2.05). As
+pre-registered, that disagreement is informative rather than a tiebreak to
+resolve: the effect lives in the tails and is not monotonic across the
+cross-section.
+
+## Stage 2: FAIL
+
+Primary specification -- ten positions, monthly, Rs 40,000:
+
+```
+strategy (N=10)          +1104.9%  CAGR +13.51%  Sharpe 0.64  maxDD 72.8%
+equal-weight eligible    +1027.3%  CAGR +13.12%  Sharpe 0.66  maxDD 74.3%
+benchmark x beta 0.75     +585.8%  CAGR +10.30%  Sharpe 0.66  maxDD 63.3%
+beta 0.75 (t vs 1 = -22.42) | alpha +4.51%/yr (t=+1.11)
+1,507 fills, costs Rs 22,225 = 55.6% of capital
+```
+
+**Sharpe 0.64 against the benchmark's 0.66. The pre-registered bar is not met.**
+Alpha is positive and insignificant, exactly as in the first cross-sectional
+run.
+
+Robustness distribution, reported whole:
+
+| capital | N | CAGR | Sharpe | alpha | t | costs | verdict |
+|---|---|---|---|---|---|---|---|
+| 40,000 | 5 | 5.15% | 0.35 | -0.66% | -0.17 | 12.9% | FAIL |
+| 40,000 | 8 | 10.92% | 0.60 | +3.63% | +0.97 | 28.8% | FAIL |
+| **40,000** | **10** | **13.51%** | **0.64** | **+4.51%** | **+1.11** | **55.6%** | **FAIL (primary)** |
+| 40,000 | 20 | 15.18% | 0.73 | +5.19% | +1.52 | 55.5% | PASS |
+| 1,000,000 | 5 | 0.34% | 0.11 | -4.40% | -1.35 | 6.0% | FAIL |
+| 1,000,000 | 8 | 16.13% | 0.75 | +7.97% | +1.89 | 68.6% | PASS |
+| 1,000,000 | 10 | 12.43% | 0.62 | +3.89% | +1.00 | 41.1% | FAIL |
+| 1,000,000 | 20 | 17.86% | 0.83 | +7.64% | +2.22 | 80.5% | PASS |
+
+**The primary fails and variants pass, which this file called in advance: the
+hypothesis has failed, and N=20 is a new hypothesis needing its own sample.**
+
+Three reasons not to reach for the passing cells:
+
+*Sharpe rises with N, which is what diversification does.* The benchmark holds
+~600 names at Sharpe 0.66. The strategy only approaches it as N grows toward
+that. Recovering diversification is not evidence of selection skill.
+
+*No alpha t-statistic reaches 2 except one, and it is the best of eight cells.*
+The first cross-sectional run reported the same shape -- positive in 9 of 10
+cells, significant in none -- and it was not evidence then either.
+
+*The distribution is not monotonic.* At Rs 1,000,000, N=8 (0.75) beats N=10
+(0.62) and loses to N=20 (0.83). Ordering that unstable across adjacent settings
+is noise, not a parameter surface with a good region in it.
+
+## What was learned, and what was not
+
+The signal is real in this sample: Stage 1 is not a marginal pass, and it
+survived a survivorship-free panel with delisted names retained. **What is not
+reachable is the money.** Sixteen of the spread's twenty-eight points are the
+short leg, and CNC cannot short. Of the twelve that remain, costs take 3.3%/yr
+at the primary specification -- Rs 22,225 on a Rs 40,000 account over 16.6
+years -- and the residual does not clear a Sharpe bar against simply holding the
+eligible universe equal-weight.
+
+That last comparison is the useful one. An equal-weight hold of every liquid
+NSE name returned 13.12%/yr at Sharpe 0.66 over the same period, with no
+ranking, no monthly turnover and no costs. The momentum overlay, at this account
+size, is worse than that.
+
+**No capital is committed on this result.** The live gate is untouched.
