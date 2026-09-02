@@ -259,10 +259,25 @@ def write_panel(panel: Panel, out_dir: Path = OUT_DIR, prefix: str = "bhav") -> 
 
 
 #: A single-session move this extreme is, in practice, never a real price move:
-#: it is a corporate action, or a data error. -0.55 sits below the -50% that a
-#: 1:2 action produces and above the tick-floor noise of sub-rupee penny names
-#: (BIRLACOT oscillating 0.10 -> 0.05 is -50% and genuinely traded).
-JUMP_DOWN, JUMP_UP = -0.55, 1.50
+#: it is a corporate action, or a data error.
+#:
+#: These were -0.55 and 1.50, chosen to sit below the -50% a 1:2 action produces
+#: so that sub-rupee names oscillating 0.10 -> 0.05 would not be quarantined.
+#: That reasoning was wrong in a way the one-quarter test could not show. Those
+#: penny names are already excluded by the Rs 10 price floor in the eligibility
+#: screen, so sparing them bought nothing -- while the same gap let every
+#: unadjusted 1:2 split through, which is the exact shape that manufactures
+#: momentum. On the twenty-year panel it left 15 such moves on names that pass
+#: the screen: MASTEK 834 -> 380 and DABUR 73.65 -> 36.02 among them, each a
+#: real 2006 bonus that NSE's feed does not carry.
+#:
+#: 1.50 had the mirror hole: an unadjusted consolidation shows as a doubling,
+#: and +100% slipped under it.
+#:
+#: The cost of tightening is 0.9% of entities, and a handful of genuine one-day
+#: crashes lose the history before them. That is the conservative direction --
+#: it removes names from the sample rather than inventing returns for them.
+JUMP_DOWN, JUMP_UP = -0.42, 0.90
 
 
 def mask_unexplained_jumps(panel: "Panel", jump_down: float = JUMP_DOWN,
@@ -339,7 +354,8 @@ def scan_observations(files: list[Path], series: tuple[str, ...] = ("EQ",)
 def build_panel_streaming(files: list[Path], actions: pd.DataFrame | None = None,
                           series: tuple[str, ...] = ("EQ",),
                           out_dir: Path = OUT_DIR, prefix: str = "bhav",
-                          dtype: str = "float32", mask_jumps: bool = True
+                          dtype: str = "float32", mask_jumps: bool = True,
+                          max_hold_gb: float = 0.5
                           ) -> tuple[Entities, object, dict]:
     """Build and write each field separately, holding one at a time.
 
@@ -367,11 +383,26 @@ def build_panel_streaming(files: list[Path], actions: pd.DataFrame | None = None
     # the factors are reused for open. Nothing else is adjusted.
     conf, factors, cutoffs = None, {}, {}
     written: dict = {}
+    fields = ("close", "open", "volume", "turnover")
 
-    for fld in ("close", "open", "volume", "turnover"):
-        arr = np.full((len(dates), len(entities)), np.nan, dtype=dtype)
+    # One array per field is len(dates) x len(entities) x 4 bytes. Twenty years
+    # of NSE resolves to ~3,800 entities, so that is ~80MB each and all four fit
+    # comfortably -- at which point re-reading all 5,100 day-files once per
+    # field is pure waste, and the four passes are what pushed this past the
+    # runner's ten-minute ceiling. Hold them together when they fit, fall back
+    # to one at a time when they do not.
+    est_gb = len(dates) * len(entities) * 4 * len(fields) / 1e9
+    single_pass = est_gb <= max_hold_gb
+    log.info("panel %d x %d, %.2f GB for all fields -> %s",
+             len(dates), len(entities), est_gb,
+             "single pass" if single_pass else "one field at a time")
+
+    arrays: dict = {}
+    if single_pass:
+        for fld in fields:
+            arrays[fld] = np.full((len(dates), len(entities)), np.nan, dtype=dtype)
         for f in files:
-            df = pd.read_parquet(f, columns=["date", "isin", "series", fld])
+            df = pd.read_parquet(f, columns=["date", "isin", "series", *fields])
             df = df[df["series"].isin(series)]
             if df.empty:
                 continue
@@ -383,7 +414,29 @@ def build_panel_streaming(files: list[Path], actions: pd.DataFrame | None = None
             if not keep.any():
                 continue
             j = e[keep].map(col).to_numpy(dtype="int64")
-            arr[i, j] = df.loc[keep, fld].to_numpy(dtype=dtype)
+            sub = df.loc[keep]
+            for fld in fields:
+                arrays[fld][i, j] = sub[fld].to_numpy(dtype=dtype)
+
+    for fld in fields:
+        if single_pass:
+            arr = arrays.pop(fld)
+        else:
+            arr = np.full((len(dates), len(entities)), np.nan, dtype=dtype)
+            for f in files:
+                df = pd.read_parquet(f, columns=["date", "isin", "series", fld])
+                df = df[df["series"].isin(series)]
+                if df.empty:
+                    continue
+                i = row.get(pd.Timestamp(df["date"].iloc[0]))
+                if i is None:
+                    continue
+                e = df["isin"].map(ents.isin_to_entity)
+                keep = e.notna()
+                if not keep.any():
+                    continue
+                j = e[keep].map(col).to_numpy(dtype="int64")
+                arr[i, j] = df.loc[keep, fld].to_numpy(dtype=dtype)
 
         frame = pd.DataFrame(arr, index=index, columns=entities)
         del arr
@@ -414,19 +467,51 @@ def build_panel_streaming(files: list[Path], actions: pd.DataFrame | None = None
 
 
 def _confirm_streaming(actions, close, ents, confirm):
-    """Confirm actions against a wide close frame, entity-keyed."""
+    """Confirm actions against a wide close frame, entity-keyed.
+
+    Only the (entity, ex-date) cells the actions actually reference are read.
+    Stacking the panel to long form would be the obvious way to reuse `confirm`
+    unchanged, and it is what an earlier version did -- but over twenty years
+    that is ~12M rows carrying a string key, more than a gigabyte, to answer a
+    few thousand lookups. It fits comfortably on a one-quarter test panel and
+    not at all on the real one, which is the shape of bug this whole builder
+    exists to avoid.
+
+    "Previous close" means the previous *listed* session, not the previous row:
+    a name that did not trade yesterday must compare against the last day it
+    did, or a trading gap is misread as a price move.
+    """
     acts = actions.copy()
     syms = acts["symbol"] if "symbol" in acts.columns else pd.Series(
         [None] * len(acts), index=acts.index)
     acts["entity"] = [ents.entity_for(i, s) for i, s in zip(acts["isin"], syms)]
     acts = acts.dropna(subset=["entity"])
+    empty = pd.DataFrame(columns=["date", "entity", "close"])
     if acts.empty:
-        return confirm(acts, pd.DataFrame(columns=["date", "entity", "close"]),
-                       key="entity")
-    long = close.stack(future_stack=True).rename("close").reset_index()
-    long.columns = ["date", "entity", "close"]
-    long = long.dropna(subset=["close"])
-    return confirm(acts, long, key="entity")
+        return confirm(acts, empty, key="entity")
+
+    row = {d: i for i, d in enumerate(close.index)}
+    col = {c: j for j, c in enumerate(close.columns)}
+    values = close.to_numpy()
+
+    rows = []
+    for ent, ex in set(zip(acts["entity"], acts["ex_date"])):
+        i, j = row.get(pd.Timestamp(ex)), col.get(ent)
+        if i is None or j is None or i == 0:
+            continue
+        cur = values[i, j]
+        if not np.isfinite(cur):
+            continue
+        prev_col = values[:i, j]
+        finite = np.flatnonzero(np.isfinite(prev_col))
+        if not len(finite):
+            continue
+        k = finite[-1]
+        rows.append((close.index[k], ent, float(prev_col[k])))
+        rows.append((close.index[i], ent, float(cur)))
+
+    sparse = pd.DataFrame(rows, columns=["date", "entity", "close"]) if rows else empty
+    return confirm(acts, sparse, key="entity")
 
 
 def _factor_steps(confirmed: pd.DataFrame, dates: pd.DatetimeIndex) -> dict:
