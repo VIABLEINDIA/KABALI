@@ -9,6 +9,12 @@ each, paced to stay under NSE's rate limiting. Twenty years is about an hour on
 a first run and seconds afterwards, because every day-file and every corporate
 action window is cached. An interrupted pull is resumed by running it again.
 
+The build half streams. Holding twenty years as one long frame plus four wide
+panels needs ~2GB and would fail on a small machine, so each field is filled,
+adjusted, written and released before the next begins -- peak memory is one
+panel rather than five. Verified to reproduce the in-memory builder exactly, to
+float32 precision, on the 2015 Q3 slice.
+
 Written for `docs/xsection_hypothesis.md`, which measures that the existing
 3.9-year panel cannot resolve the cross-sectional momentum hypothesis at any
 sample size and names the longer panel as the precondition for testing it.
@@ -25,12 +31,24 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from kabali.data.bhavcopy import fetch_range, load_cached          # noqa: E402
-from kabali.data.corpactions import fetch_actions                  # noqa: E402
-from kabali.data.panel import (build_panel, mask_unexplained_jumps,  # noqa: E402
-                               suspicious_entities, write_panel)
+from kabali.data.bhavcopy import CACHE_DIR, fetch_range                 # noqa: E402
+from kabali.data.corpactions import fetch_actions                       # noqa: E402
+from kabali.data.panel import (build_panel_streaming,                   # noqa: E402
+                               suspicious_from_panel)
 
 log = logging.getLogger("build_panel")
+
+
+def cached_files(start: date, end: date, cache_dir: Path) -> list[Path]:
+    out = []
+    for f in sorted(Path(cache_dir).glob("*.parquet")):
+        try:
+            d = pd.Timestamp(f.stem).date()
+        except ValueError:
+            continue
+        if start <= d <= end:
+            out.append(f)
+    return out
 
 
 def main() -> int:
@@ -56,40 +74,42 @@ def main() -> int:
         hit, miss = fetch_range(start, end)
         print(f"  {hit:,} trading days, {miss:,} non-trading")
 
-    long = load_cached(start, end)
-    print(f"loaded {len(long):,} rows, "
-          f"{long['date'].min().date()} -> {long['date'].max().date()}")
+    files = cached_files(start, end, CACHE_DIR)
+    if not files:
+        print(f"no cached day-files in {CACHE_DIR} for that range")
+        return 1
+    print(f"{len(files):,} cached day-files, "
+          f"{pd.Timestamp(files[0].stem).date()} -> {pd.Timestamp(files[-1].stem).date()}")
 
     # Reach a quarter beyond the price window: an action just outside it still
     # needs its factor to adjust prices inside it.
     print("fetching corporate actions")
-    actions = fetch_actions(start - timedelta(days=95),
-                            end + timedelta(days=95))
+    actions = fetch_actions(start - timedelta(days=95), end + timedelta(days=95))
     print(f"  {len(actions):,} actions, "
           f"{int(actions['factor'].notna().sum()):,} priceable")
 
-    panel = build_panel(long, actions)
+    print("building panels (one field at a time)")
+    ents, conf, written = build_panel_streaming(
+        files, actions, prefix=args.prefix, mask_jumps=not args.no_mask)
+
     print()
-    print(panel.entities.render())
-    if panel.confirmation is not None:
-        print(panel.confirmation.render())
+    print(ents.render())
+    if conf is not None:
+        print(conf.render())
+    print(f"quarantined {written.get('quarantined', 0):,} entities with "
+          "unexplained jumps (history before the jump blanked)")
 
-    if not args.no_mask:
-        panel, jumps = mask_unexplained_jumps(panel)
-        print(f"quarantined {len(jumps):,} entities with unexplained jumps "
-              f"(history before the jump blanked)")
-        if len(jumps):
-            print(jumps.head(8).to_string(index=False))
-
-    susp = suspicious_entities(long, panel.entities)
-    print(f"{len(susp):,} entities contain a gap of 180+ days "
+    close = pd.read_parquet(written["close"])
+    listed = close.notna().sum(axis=1)
+    print(f"{suspicious_from_panel(close):,} entities contain a gap of 180+ days "
           "(suspensions and possible over-merges)")
-
     print()
-    print(panel.render())
-    written = write_panel(panel, prefix=args.prefix)
-    for p in written:
-        print(f"  wrote {p}")
+    print(f"panel {close.shape[0]:,} sessions x {close.shape[1]:,} entities | "
+          f"{close.index.min().date()} -> {close.index.max().date()} | "
+          f"listed names {listed.iloc[0]:,} at start, {listed.iloc[-1]:,} at end")
+    for k, v in written.items():
+        if k != "quarantined":
+            print(f"  wrote {v}")
     return 0
 
 

@@ -132,3 +132,66 @@ def test_reused_ticker_is_not_merged_across_a_long_gap():
                  ("2020-01-02", "INENEW0000B2", "ZZZ")])
     ents = resolve_entities(long)
     assert len(set(ents.isin_to_entity.values())) == 2
+
+
+def _write_day(tmp, d, rows):
+    """One synthetic cached day-file in the normalised bhavcopy shape."""
+    df = pd.DataFrame(rows, columns=["isin", "symbol", "close", "open",
+                                     "volume", "turnover"])
+    df.insert(0, "date", pd.Timestamp(d))
+    df.insert(4, "series", "EQ")
+    df.insert(5, "high", df["close"])
+    df.insert(6, "low", df["close"])
+    df.insert(7, "prev_close", df["close"])
+    p = tmp / f"{pd.Timestamp(d):%Y%m%d}.parquet"
+    df.to_parquet(p, index=False)
+    return p
+
+
+def test_streaming_builder_matches_the_in_memory_one(tmp_path):
+    """The two builders must agree.
+
+    The streaming path exists only because the in-memory one needs ~2GB over
+    twenty years. It is the one that actually runs, so if the two ever diverge
+    the cheap builder that every test uses stops describing the real output.
+    """
+    import numpy as np
+
+    from kabali.data.panel import build_panel, build_panel_streaming
+
+    days = pd.bdate_range("2020-01-01", periods=6)
+    files = []
+    for k, d in enumerate(days):
+        files.append(_write_day(tmp_path, d, [
+            ("INE000000001", "AAA", 100.0 + k, 99.0 + k, 1000 + k, 5e5 + k),
+            ("INE000000002", "BBB", 50.0 - k, 49.0 - k, 2000 + k, 6e5 + k),
+        ]))
+
+    long = pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
+    ref = build_panel(long)
+    ents, _, written = build_panel_streaming(files, out_dir=tmp_path,
+                                             prefix="s", mask_jumps=False)
+
+    assert set(ents.isin_to_entity.values()) == set(ref.entities.isin_to_entity.values())
+    got = pd.read_parquet(written["close"])
+    cols = sorted(ref.close.columns)
+    assert sorted(got.columns) == cols
+    assert np.allclose(ref.close[cols].to_numpy(),
+                       got[cols].to_numpy(), rtol=1e-6, equal_nan=True)
+
+
+def test_streaming_builder_quarantines_an_unexplained_jump(tmp_path):
+    """A 1:10-shaped step with no corporate action blanks the prior history."""
+    from kabali.data.panel import build_panel_streaming
+
+    days = pd.bdate_range("2020-01-01", periods=5)
+    prices = [100.0, 101.0, 9.9, 10.0, 10.1]        # -90% on day 3, unexplained
+    files = [_write_day(tmp_path, d, [("INE000000001", "AAA", p, p, 10, 1e5)])
+             for d, p in zip(days, prices)]
+
+    _, _, written = build_panel_streaming(files, out_dir=tmp_path, prefix="q")
+    close = pd.read_parquet(written["close"])
+    col = close.columns[0]
+    assert close[col].iloc[:2].isna().all(), "pre-jump history must be blanked"
+    assert close[col].iloc[2:].notna().all(), "post-jump history must survive"
+    assert written["quarantined"] == 1

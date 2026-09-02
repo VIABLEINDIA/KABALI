@@ -32,6 +32,7 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 log = logging.getLogger(__name__)
@@ -102,6 +103,17 @@ def resolve_entities(long: pd.DataFrame,
     """
     obs = (long.groupby(["symbol", "isin"], observed=True)["date"]
            .agg(["min", "max"]).reset_index())
+    return resolve_from_observations(obs, max_gap_days)
+
+
+def resolve_from_observations(obs: pd.DataFrame,
+                              max_gap_days: int = MAX_LINK_GAP_DAYS) -> Entities:
+    """Identity resolution from a pre-aggregated (symbol, isin, min, max) frame.
+
+    Split out so the streaming builder can resolve identity from a cheap
+    first pass over the cache without ever holding the full long frame, which
+    at twenty years is ~10M rows and larger than this machine's free memory.
+    """
 
     # Split a symbol into eras where its uses are far apart in time.
     sym_era: dict[tuple[str, str], str] = {}
@@ -124,9 +136,12 @@ def resolve_entities(long: pd.DataFrame,
         isin_to_entity[r["isin"]] = key
         groups.setdefault(key, set()).add(r["isin"])
 
-    # Display name: the symbol most recently seen for the entity.
-    last = (long.sort_values("date").groupby("isin", observed=True)["symbol"].last())
-    latest = (long.groupby("isin", observed=True)["date"].max())
+    # Display name: the symbol most recently seen for the entity. Taken from
+    # `obs` rather than the raw rows so this works for the streaming builder,
+    # which never materialises them.
+    newest = obs.sort_values("max").drop_duplicates("isin", keep="last")
+    last = dict(zip(newest["isin"], newest["symbol"]))
+    latest = dict(zip(newest["isin"], newest["max"]))
     display: dict[str, str] = {}
     best: dict[str, pd.Timestamp] = {}
     for isin, ent in isin_to_entity.items():
@@ -284,3 +299,206 @@ def mask_unexplained_jumps(panel: "Panel", jump_down: float = JUMP_DOWN,
     report = pd.DataFrame(rows).sort_values("return") if rows else pd.DataFrame(
         columns=["entity", "symbol", "last_jump", "jumps", "return"])
     return masked, report
+
+
+# --------------------------------------------------------- streaming builder
+def scan_observations(files: list[Path], series: tuple[str, ...] = ("EQ",)
+                      ) -> tuple[pd.DataFrame, list[pd.Timestamp]]:
+    """First pass: (symbol, isin) date ranges, without holding the rows.
+
+    Twenty years of bhavcopy is ~10M rows; concatenated with string columns it
+    does not fit in this machine's free memory alongside the wide panels. Only
+    the four identity columns are read, and only min/max per pair is kept, so
+    the pass costs a few hundred kilobytes regardless of history length.
+    """
+    span: dict[tuple[str, str], list] = {}
+    dates: list[pd.Timestamp] = []
+    for f in files:
+        df = pd.read_parquet(f, columns=["date", "isin", "symbol", "series"])
+        df = df[df["series"].isin(series)]
+        if df.empty:
+            continue
+        d = pd.Timestamp(df["date"].iloc[0])
+        dates.append(d)
+        for sym, isin in set(zip(df["symbol"], df["isin"])):
+            k = (sym, isin)
+            cur = span.get(k)
+            if cur is None:
+                span[k] = [d, d]
+            else:
+                if d < cur[0]:
+                    cur[0] = d
+                if d > cur[1]:
+                    cur[1] = d
+    obs = pd.DataFrame(
+        [(s, i, lo, hi) for (s, i), (lo, hi) in span.items()],
+        columns=["symbol", "isin", "min", "max"])
+    return obs, sorted(dates)
+
+
+def build_panel_streaming(files: list[Path], actions: pd.DataFrame | None = None,
+                          series: tuple[str, ...] = ("EQ",),
+                          out_dir: Path = OUT_DIR, prefix: str = "bhav",
+                          dtype: str = "float32", mask_jumps: bool = True
+                          ) -> tuple[Entities, object, dict]:
+    """Build and write each field separately, holding one at a time.
+
+    `build_panel` materialises four wide frames plus an adjustment matrix at
+    once; over twenty years that is ~2GB and this machine has 0.6GB free. Here
+    each field is filled into a single array, adjusted, written and released
+    before the next begins, so peak memory is one panel rather than five.
+
+    float32 is deliberate. It carries ~7 significant digits, which resolves
+    paise on every Indian equity price below Rs 100,000 and costs ~1e-7 relative
+    error on a return -- far below the precision any of this is used at, and it
+    halves the footprint.
+    """
+    from kabali.data.corpactions import confirm
+
+    obs, dates = scan_observations(files, series)
+    ents = resolve_from_observations(obs)
+    obs["entity"] = obs["isin"].map(ents.isin_to_entity)
+    entities = sorted(set(obs["entity"].dropna()))
+    col = {e: i for i, e in enumerate(entities)}
+    row = {d: i for i, d in enumerate(dates)}
+    index = pd.DatetimeIndex(dates)
+
+    # Confirming actions needs only close, so it runs inside the close pass and
+    # the factors are reused for open. Nothing else is adjusted.
+    conf, factors, cutoffs = None, {}, {}
+    written: dict = {}
+
+    for fld in ("close", "open", "volume", "turnover"):
+        arr = np.full((len(dates), len(entities)), np.nan, dtype=dtype)
+        for f in files:
+            df = pd.read_parquet(f, columns=["date", "isin", "series", fld])
+            df = df[df["series"].isin(series)]
+            if df.empty:
+                continue
+            i = row.get(pd.Timestamp(df["date"].iloc[0]))
+            if i is None:
+                continue
+            e = df["isin"].map(ents.isin_to_entity)
+            keep = e.notna()
+            if not keep.any():
+                continue
+            j = e[keep].map(col).to_numpy(dtype="int64")
+            arr[i, j] = df.loc[keep, fld].to_numpy(dtype=dtype)
+
+        frame = pd.DataFrame(arr, index=index, columns=entities)
+        del arr
+
+        if fld == "close":
+            if actions is not None and not actions.empty:
+                conf = _confirm_streaming(actions, frame, ents, confirm)
+                factors = _factor_steps(conf.confirmed, index)
+            _apply_factors(frame, factors, col)
+            # Quarantine is decided here, on adjusted close, and the same
+            # cutoffs are reused for open -- recomputing them per field could
+            # blank different rows in the two panels and desynchronise them.
+            cutoffs = _jump_cutoffs(frame) if mask_jumps else {}
+            _apply_cutoffs(frame, cutoffs)
+        elif fld == "open":
+            _apply_factors(frame, factors, col)
+            _apply_cutoffs(frame, cutoffs)
+
+        p = Path(out_dir)
+        p.mkdir(parents=True, exist_ok=True)
+        path = p / f"{prefix}_{fld}.parquet"
+        frame.to_parquet(path)
+        written[fld] = path
+        del frame
+
+    written["quarantined"] = len(cutoffs)
+    return ents, conf, written
+
+
+def _confirm_streaming(actions, close, ents, confirm):
+    """Confirm actions against a wide close frame, entity-keyed."""
+    acts = actions.copy()
+    syms = acts["symbol"] if "symbol" in acts.columns else pd.Series(
+        [None] * len(acts), index=acts.index)
+    acts["entity"] = [ents.entity_for(i, s) for i, s in zip(acts["isin"], syms)]
+    acts = acts.dropna(subset=["entity"])
+    if acts.empty:
+        return confirm(acts, pd.DataFrame(columns=["date", "entity", "close"]),
+                       key="entity")
+    long = close.stack(future_stack=True).rename("close").reset_index()
+    long.columns = ["date", "entity", "close"]
+    long = long.dropna(subset=["close"])
+    return confirm(acts, long, key="entity")
+
+
+def _factor_steps(confirmed: pd.DataFrame, dates: pd.DatetimeIndex) -> dict:
+    """entity -> list of (row index of ex-date, factor).
+
+    Kept as steps rather than a dense (dates x entities) matrix: over twenty
+    years that matrix is another full panel of memory, and only a few thousand
+    entities have any action at all.
+    """
+    out: dict[str, list] = {}
+    if confirmed is None or confirmed.empty:
+        return out
+    pos = {d: i for i, d in enumerate(dates)}
+    for _, r in confirmed.iterrows():
+        i = pos.get(pd.Timestamp(r["ex_date"]))
+        if i is None:
+            continue
+        out.setdefault(r["entity"], []).append((i, float(r["factor"])))
+    return out
+
+
+def _apply_factors(frame: pd.DataFrame, factors: dict, col: dict) -> None:
+    """Back-adjust in place: prices before an ex-date scale by its factor."""
+    for ent, steps in factors.items():
+        j = col.get(ent)
+        if j is None:
+            continue
+        values = frame.iloc[:, j].to_numpy(copy=True)
+        for i, f in sorted(steps):
+            values[:i] *= f
+        frame.iloc[:, j] = values
+
+
+def _jump_cutoffs(close: pd.DataFrame) -> dict:
+    """entity -> row index before which history is unexplained, so blanked."""
+    r = close.pct_change(fill_method=None)
+    hits = (r < JUMP_DOWN) | (r > JUMP_UP)
+    out = {}
+    cols = hits.columns[hits.any().to_numpy()]
+    for ent in cols:
+        rows = np.flatnonzero(hits[ent].fillna(False).to_numpy())
+        if len(rows):
+            out[ent] = int(rows.max())
+    return out
+
+
+def _apply_cutoffs(frame: pd.DataFrame, cutoffs: dict) -> None:
+    """Blank everything before each cutoff, in place."""
+    if not cutoffs:
+        return
+    pos = {c: i for i, c in enumerate(frame.columns)}
+    for ent, i in cutoffs.items():
+        j = pos.get(ent)
+        if j is not None:
+            frame.iloc[:i, j] = np.nan
+
+
+def suspicious_from_panel(close: pd.DataFrame, gap_days: int = 180) -> int:
+    """How many entities contain a listing gap this long.
+
+    Computed from the panel's own presence pattern so it needs no second pass
+    over the cache. Suspensions produce these legitimately; an over-merged
+    ticker also would, which is why the count is reported rather than trusted.
+    """
+    idx = close.index
+    n = 0
+    present = close.notna().to_numpy()
+    days = idx.to_numpy().astype("datetime64[D]").astype(int)
+    for j in range(present.shape[1]):
+        rows = np.flatnonzero(present[:, j])
+        if len(rows) < 2:
+            continue
+        if np.diff(days[rows]).max() >= gap_days:
+            n += 1
+    return n
